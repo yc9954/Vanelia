@@ -124,7 +124,7 @@ class Dust3RCameraExtractor:
         return blender_matrix
 
     def run_dust3r_inference(self, frame_paths: List[str],
-                            batch_size: int = 4) -> Dict:
+                            batch_size: int = 8) -> Dict:
         """
         Run Dust3R inference on frames.
 
@@ -190,8 +190,9 @@ class Dust3RCameraExtractor:
         result = self.run_dust3r_inference(frame_paths)
 
         # Convert camera poses to Blender coordinate system
-        cameras_opencv = result['cameras'].cpu().numpy()
-        intrinsics = result['intrinsics'].cpu().numpy()
+        # Detach tensors from computation graph before converting to numpy
+        cameras_opencv = result['cameras'].cpu().detach().numpy()
+        intrinsics = result['intrinsics'].cpu().detach().numpy()
 
         cameras_blender = []
         for cam_matrix in cameras_opencv:
@@ -206,6 +207,59 @@ class Dust3RCameraExtractor:
             cameras_blender.append(blender_cam)
 
         cameras_blender = np.array(cameras_blender)
+
+        # Convert and save point cloud (if available)
+        pts3d_path = output_path / "point_cloud.npy"
+        if 'pts3d' in result and result['pts3d'] is not None:
+            # Convert point cloud to numpy and save
+            try:
+                pts3d = result['pts3d']
+                
+                # Handle different tensor types - ensure CUDA tensors are moved to CPU first
+                if torch.is_tensor(pts3d):
+                    pts3d = pts3d.cpu().detach().numpy()
+                elif hasattr(pts3d, 'cpu'):
+                    pts3d = pts3d.cpu().detach().numpy()
+                elif hasattr(pts3d, 'numpy'):
+                    pts3d = pts3d.numpy()
+                elif isinstance(pts3d, (list, tuple)):
+                    # Check if list contains tensors
+                    if pts3d and torch.is_tensor(pts3d[0]):
+                        pts3d = torch.stack(pts3d).cpu().detach().numpy()
+                    else:
+                        pts3d = np.array(pts3d)
+                
+                # Ensure it's a numpy array (final check)
+                if torch.is_tensor(pts3d):
+                    pts3d = pts3d.cpu().detach().numpy()
+                elif not isinstance(pts3d, np.ndarray):
+                    pts3d = np.array(pts3d)
+                
+                # Handle different shapes: (N, 3), (N,), or nested structures
+                if pts3d.ndim == 0:
+                    # Scalar - skip
+                    print(f"[Dust3R] WARNING: Point cloud is scalar, skipping save")
+                elif pts3d.ndim == 1:
+                    # 1D array - might need reshaping
+                    if len(pts3d) % 3 == 0:
+                        pts3d = pts3d.reshape(-1, 3)
+                    else:
+                        print(f"[Dust3R] WARNING: Point cloud shape {pts3d.shape} not recognized, saving as-is")
+                elif pts3d.ndim > 2:
+                    # Flatten to (N, 3) if possible
+                    if pts3d.shape[-1] == 3:
+                        pts3d = pts3d.reshape(-1, 3)
+                    else:
+                        print(f"[Dust3R] WARNING: Point cloud shape {pts3d.shape} not standard, saving as-is")
+                
+                # Save point cloud
+                np.save(pts3d_path, pts3d)
+                num_points = len(pts3d) if pts3d.ndim > 0 else 0
+                print(f"[Dust3R] Point cloud saved: {pts3d_path} (shape: {pts3d.shape}, ~{num_points} points)")
+            except Exception as e:
+                print(f"[Dust3R] WARNING: Could not save point cloud: {e}")
+                import traceback
+                traceback.print_exc()
 
         # Save results
         poses_path = output_path / "camera_poses.npy"

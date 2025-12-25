@@ -57,7 +57,7 @@ class BlenderRenderer:
         scene = bpy.context.scene
         scene.render.engine = 'CYCLES'
         scene.cycles.device = 'GPU'
-        scene.cycles.samples = 128  # High quality
+        scene.cycles.samples = 64  # Increased samples for better quality
         scene.render.resolution_x = resolution_x
         scene.render.resolution_y = resolution_y
         scene.render.resolution_percentage = 100
@@ -68,21 +68,29 @@ class BlenderRenderer:
         scene.render.image_settings.color_mode = 'RGBA'
         scene.render.image_settings.color_depth = '8'
 
-        # Enable denoising for cleaner output
+        # Enable denoising for cleaner output (compensates for lower samples)
         scene.cycles.use_denoising = True
         scene.view_layers[0].cycles.use_denoising = True
+        
+        # Increase light bounces for better lighting
+        scene.cycles.max_bounces = 8
+        scene.cycles.diffuse_bounces = 4
+        scene.cycles.glossy_bounces = 4
+        scene.cycles.transparent_max_bounces = 8
 
         print("[Blender] ✓ Transparent RGBA rendering enabled")
 
     def load_glb_model(self, glb_path: str, scale: float = 1.0,
-                      location: tuple = (0, 0, 0)) -> bpy.types.Object:
+                      location: tuple = (0, 0, 0),
+                      plane_normal: np.ndarray = None) -> bpy.types.Object:
         """
-        Load .glb model into scene.
+        Load GLB model into scene.
 
         Args:
             glb_path: Path to .glb file
             scale: Uniform scale factor
             location: (x, y, z) position
+            plane_normal: Normal vector of plane to align with (aligns object Z-axis)
 
         Returns:
             Loaded object
@@ -96,6 +104,50 @@ class BlenderRenderer:
         imported_obj = bpy.context.selected_objects[0]
         imported_obj.scale = (scale, scale, scale)
         imported_obj.location = location
+        
+        # Print object placement info for debugging
+        print(f"\n[Blender] Object Placement:")
+        print(f"  - Location: ({location[0]:.6f}, {location[1]:.6f}, {location[2]:.6f})")
+        print(f"  - Scale: {scale:.3f}")
+        bbox = imported_obj.bound_box
+        bbox_size = (
+            max(v[0] for v in bbox) - min(v[0] for v in bbox),
+            max(v[1] for v in bbox) - min(v[1] for v in bbox),
+            max(v[2] for v in bbox) - min(v[2] for v in bbox)
+        )
+        print(f"  - Bounding Box Size: ({bbox_size[0]:.3f}, {bbox_size[1]:.3f}, {bbox_size[2]:.3f})")
+        print(f"  - Scaled Size: ({bbox_size[0]*scale:.3f}, {bbox_size[1]*scale:.3f}, {bbox_size[2]*scale:.3f})")
+
+        # Align object Z-axis with plane normal if provided
+        if plane_normal is not None:
+            # Convert numpy array to Blender Vector
+            target_normal = Vector(plane_normal.tolist() if hasattr(plane_normal, 'tolist') else plane_normal)
+            target_normal.normalize()
+            
+            # Object's default up vector is Z-axis (0, 0, 1) in Blender
+            default_up = Vector((0, 0, 1))
+            
+            # Calculate rotation to align default_up with target_normal
+            # Use rotation_difference if available, otherwise use manual calculation
+            try:
+                # Calculate rotation quaternion
+                rotation_quat = default_up.rotation_difference(target_normal)
+                imported_obj.rotation_mode = 'QUATERNION'
+                imported_obj.rotation_quaternion = rotation_quat
+            except:
+                # Fallback: manual calculation using cross product
+                # Find rotation axis and angle
+                axis = default_up.cross(target_normal)
+                if axis.length > 1e-6:
+                    axis.normalize()
+                    angle = default_up.angle(target_normal)
+                    imported_obj.rotation_mode = 'AXIS_ANGLE'
+                    imported_obj.rotation_axis_angle = (angle, axis.x, axis.y, axis.z)
+                else:
+                    # Vectors are parallel, no rotation needed
+                    pass
+            
+            print(f"[Blender] ✓ Aligned object Z-axis with plane normal: {target_normal}")
 
         print(f"[Blender] ✓ Loaded: {imported_obj.name}")
         return imported_obj
@@ -170,26 +222,15 @@ class BlenderRenderer:
             resolution: (width, height)
         """
         width, height = resolution
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
 
-        if intrinsics.shape == (3, 3):
-            fx = intrinsics[0, 0]
-            fy = intrinsics[1, 1]
-            cx = intrinsics[0, 2]
-            cy = intrinsics[1, 2]
-        else:
-            # Assume [fx, fy, cx, cy] format
-            fx, fy, cx, cy = intrinsics[:4]
+        # Calculate focal length in mm (assuming sensor width of 36mm)
+        sensor_width = 36.0
+        focal_length = (fx / width) * sensor_width
 
-        # Calculate sensor width (assuming 35mm equivalent)
-        sensor_width = 36.0  # mm
-        focal_length = (fx * sensor_width) / width
-
-        camera_obj.data.lens = focal_length
         camera_obj.data.sensor_width = sensor_width
-
-        # Shift for principal point offset
-        camera_obj.data.shift_x = (cx - width / 2) / width
-        camera_obj.data.shift_y = (cy - height / 2) / height
+        camera_obj.data.lens = focal_length
 
         print(f"[Blender] ✓ Camera focal length: {focal_length:.2f}mm")
 
@@ -209,6 +250,12 @@ class BlenderRenderer:
         scene.frame_start = start_frame
         scene.frame_end = start_frame + len(poses) - 1
 
+        # Print first camera pose for debugging
+        if len(poses) > 0:
+            first_pose = poses[0]
+            cam_pos = first_pose[:3, 3]
+            print(f"[Blender] First camera position: ({cam_pos[0]:.3f}, {cam_pos[1]:.3f}, {cam_pos[2]:.3f})")
+
         for idx, pose_matrix in enumerate(poses):
             frame_num = start_frame + idx
 
@@ -221,6 +268,14 @@ class BlenderRenderer:
             # The pose from Dust3R should already be in correct Blender space
             # after opencv_to_blender_matrix conversion
             camera_obj.matrix_world = cam_matrix
+            
+            # Debug: Print camera info for first frame
+            if idx == 0:
+                cam_pos = cam_matrix.translation
+                cam_rot = cam_matrix.to_euler()
+                print(f"[Blender] Frame {frame_num} camera:")
+                print(f"  Position: ({cam_pos.x:.3f}, {cam_pos.y:.3f}, {cam_pos.z:.3f})")
+                print(f"  Rotation: ({cam_rot.x:.3f}, {cam_rot.y:.3f}, {cam_rot.z:.3f})")
 
             # Insert keyframes
             camera_obj.keyframe_insert(data_path="location", frame=frame_num)
@@ -228,28 +283,90 @@ class BlenderRenderer:
 
         print(f"[Blender] ✓ Animation: frames {start_frame}-{scene.frame_end}")
 
-    def setup_lighting(self, energy: float = 5.0):
+    def setup_lighting(self, energy: float = 8.0):
         """
-        Create basic lighting setup.
-
+        Create neutral lighting setup for IC-Light relighting.
+        
+        IC-Light (ControlNet Inpaint) will relight the object to match the background,
+        so we use moderate, neutral lighting that provides enough detail for relighting.
+        
         Args:
-            energy: Light intensity
+            energy: Base light intensity (moderate for relighting compatibility)
         """
-        print("[Blender] Setting up lighting...")
+        print("[Blender] Setting up neutral lighting (IC-Light will relight to match background)...")
 
-        # Key light
-        bpy.ops.object.light_add(type='AREA', location=(5, -5, 5))
+        # Main key light (front-right, above) - moderate intensity
+        bpy.ops.object.light_add(type='AREA', location=(3, -3, 4))
         key_light = bpy.context.active_object
         key_light.data.energy = energy
-        key_light.data.size = 5
+        key_light.data.size = 8
+        key_light.name = "KeyLight"
 
-        # Fill light
-        bpy.ops.object.light_add(type='AREA', location=(-5, -5, 3))
+        # Fill light (front-left, above) - softer fill
+        bpy.ops.object.light_add(type='AREA', location=(-3, -3, 4))
         fill_light = bpy.context.active_object
-        fill_light.data.energy = energy * 0.5
-        fill_light.data.size = 5
+        fill_light.data.energy = energy * 0.6
+        fill_light.data.size = 8
+        fill_light.name = "FillLight"
 
-        print("[Blender] ✓ Lighting setup complete")
+        # Top light (directly above) - ambient fill for visibility
+        bpy.ops.object.light_add(type='AREA', location=(0, 0, 6))
+        top_light = bpy.context.active_object
+        top_light.data.energy = energy * 0.3
+        top_light.data.size = 10
+        top_light.name = "TopLight"
+
+        print(f"[Blender] ✓ Neutral lighting setup complete (3 lights, base energy: {energy})")
+        print(f"[Blender]   → IC-Light will relight object to match background video")
+
+    def check_object_visibility(self, camera_obj: bpy.types.Object, obj: bpy.types.Object, frame: int = 1):
+        """
+        Check if object is visible from camera at given frame.
+        
+        Args:
+            camera_obj: Camera object
+            obj: Object to check
+            frame: Frame number
+        """
+        scene = bpy.context.scene
+        scene.frame_set(frame)
+        
+        # Get camera and object positions
+        cam_pos = Vector(camera_obj.matrix_world.translation)
+        obj_pos = Vector(obj.location)
+        
+        # Get camera direction (looks down -Z in Blender)
+        cam_matrix = camera_obj.matrix_world
+        cam_forward = Vector((0, 0, -1))
+        cam_forward.rotate(cam_matrix.to_3x3())
+        
+        # Vector from camera to object
+        to_obj = obj_pos - cam_pos
+        distance = to_obj.length
+        
+        # Check if object is in front of camera
+        dot_product = to_obj.normalized().dot(cam_forward.normalized())
+        in_front = dot_product > 0
+        
+        # Get object bounding box
+        bbox_corners = [Vector(corner) for corner in obj.bound_box]
+        bbox_center = sum(bbox_corners, Vector()) / len(bbox_corners)
+        bbox_size = max((max(c[i] for c in bbox_corners) - min(c[i] for c in bbox_corners)) for i in range(3))
+        
+        print(f"\n[Blender] Visibility Check (Frame {frame}):")
+        print(f"  - Camera position: ({cam_pos.x:.3f}, {cam_pos.y:.3f}, {cam_pos.z:.3f})")
+        print(f"  - Object position: ({obj_pos.x:.3f}, {obj_pos.y:.3f}, {obj_pos.z:.3f})")
+        print(f"  - Distance: {distance:.3f}")
+        print(f"  - In front of camera: {in_front}")
+        print(f"  - Object bbox center: ({bbox_center.x:.3f}, {bbox_center.y:.3f}, {bbox_center.z:.3f})")
+        print(f"  - Object bbox size: {bbox_size:.3f}")
+        
+        if not in_front:
+            print(f"  ⚠ WARNING: Object is behind camera!")
+        if distance > 20:
+            print(f"  ⚠ WARNING: Object is very far from camera ({distance:.1f} units)")
+        if bbox_size * obj.scale[0] < 0.01:
+            print(f"  ⚠ WARNING: Object is very small (scaled size: {bbox_size * obj.scale[0]:.3f})")
 
     def render_animation(self, output_dir: str, file_prefix: str = "frame_"):
         """
@@ -271,78 +388,90 @@ class BlenderRenderer:
             scene.frame_set(frame)
 
             # Set output path
-            output_path = os.path.join(output_dir, f"{file_prefix}{frame:06d}.png")
-            scene.render.filepath = output_path
+            frame_filename = f"{file_prefix}{frame:06d}.png"
+            frame_path = os.path.join(output_dir, frame_filename)
+            scene.render.filepath = frame_path
 
             # Render
             bpy.ops.render.render(write_still=True)
 
-            progress = ((frame - scene.frame_start + 1) / num_frames) * 100
-            print(f"  [{progress:5.1f}%] Frame {frame}/{scene.frame_end} → {output_path}")
+            if (frame - scene.frame_start) % 10 == 0:
+                print(f"[Blender] Rendered frame {frame}/{scene.frame_end}")
 
         print(f"\n[Blender] ✓ Render complete: {num_frames} frames")
 
 
 def parse_args():
-    """Parse command-line arguments (after --)."""
-    try:
-        argv = sys.argv[sys.argv.index("--") + 1:]
-    except ValueError:
+    """Parse command-line arguments."""
+    argv = sys.argv
+    if '--' in argv:
+        argv = argv[argv.index('--') + 1:]
+    else:
         argv = []
 
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--glb", type=str, required=True, help="Path to .glb model")
-    parser.add_argument("--poses", type=str, required=True, help="Path to camera_poses.npy")
-    parser.add_argument("--intrinsics", type=str, required=True, help="Path to camera_intrinsics.npy")
-    parser.add_argument("--output", type=str, required=True, help="Output directory")
-    parser.add_argument("--scale", type=float, default=1.0, help="Model scale")
-    parser.add_argument("--resolution", type=int, nargs=2, default=[1920, 1080],
-                       help="Resolution (width height)")
+    parser = argparse.ArgumentParser(description='Blender headless renderer')
+    parser.add_argument('--glb', type=str, required=True, help='GLB model path')
+    parser.add_argument('--poses', type=str, required=True, help='Camera poses .npy file')
+    parser.add_argument('--intrinsics', type=str, required=True, help='Camera intrinsics .npy file')
+    parser.add_argument('--output', type=str, required=True, help='Output directory')
+    parser.add_argument('--scale', type=float, default=1.0, help='Model scale')
+    parser.add_argument('--resolution', type=int, nargs=2, default=[1920, 1080], help='Resolution (width height)')
+    parser.add_argument('--location', type=float, nargs=3, default=None, help='Object location (x y z)')
+    parser.add_argument('--plane-normal', type=float, nargs=3, default=None, help='Plane normal for alignment (x y z)')
 
     return parser.parse_args(argv)
 
 
 def main():
-    """Main rendering pipeline."""
+    """Main rendering function."""
     args = parse_args()
 
-    print("\n" + "="*60)
-    print("VANELIA - Blender Headless Renderer")
-    print("="*60 + "\n")
-
-    # Load camera data
-    print(f"[Load] Camera poses: {args.poses}")
-    poses = np.load(args.poses)
-    print(f"[Load] Intrinsics: {args.intrinsics}")
-    intrinsics = np.load(args.intrinsics)
-    print(f"[Load] ✓ Loaded {len(poses)} camera poses\n")
+    # Default location if not provided
+    location = tuple(args.location) if args.location else (0.0, 0.0, 0.0)
+    plane_normal = np.array(args.plane_normal) if args.plane_normal else None
 
     # Initialize renderer
     renderer = BlenderRenderer()
-    renderer.setup_render_settings(args.resolution[0], args.resolution[1])
+    renderer.setup_render_settings(resolution_x=args.resolution[0], resolution_y=args.resolution[1])
 
-    # Load 3D model
-    model_obj = renderer.load_glb_model(args.glb, scale=args.scale)
+    # Load model
+    obj = renderer.load_glb_model(
+        glb_path=args.glb,
+        scale=args.scale,
+        location=location,
+        plane_normal=plane_normal
+    )
 
-    # Setup shadow catcher
+    # Create shadow catcher
     renderer.create_shadow_catcher(size=20.0)
-
-    # Setup lighting
-    renderer.setup_lighting(energy=10.0)
 
     # Setup camera
     camera = renderer.setup_camera()
-    renderer.set_camera_intrinsics(camera, intrinsics[0], tuple(args.resolution))
+
+    # Load camera data
+    poses = np.load(args.poses)
+    intrinsics = np.load(args.intrinsics)
+
+    # Apply intrinsics (use first frame's intrinsics)
+    if len(intrinsics.shape) == 3:
+        intrinsics = intrinsics[0]
+    renderer.set_camera_intrinsics(camera, intrinsics, tuple(args.resolution))
+
+    # Apply poses
     renderer.apply_camera_poses(camera, poses)
+
+    # Setup lighting
+    renderer.setup_lighting(energy=8.0)
+
+    # Check visibility before rendering
+    renderer.check_object_visibility(camera, obj, frame=1)
 
     # Render
     renderer.render_animation(args.output)
 
-    print("\n" + "="*60)
-    print("RENDER COMPLETE")
-    print("="*60 + "\n")
+    print("\n[Blender] ✓ Rendering complete!")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

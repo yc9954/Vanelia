@@ -109,6 +109,40 @@ python vanelia_pipeline.py \
     --crf 18
 ```
 
+### Memory-Safe Video Chunking (OOM Prevention)
+
+For high-resolution videos that may cause OOM (Out Of Memory) errors, use the chunking wrapper:
+
+```bash
+python memory_safe_chunking.py \
+    --input input.mp4 \
+    --model product.glb \
+    --output final_result.mp4 \
+    --chunk-duration 2 \
+    --workspace ./chunk_workspace
+```
+
+**How it works:**
+1. Splits input video into 2-second (or 60-frame) clips using ffmpeg
+2. Processes each clip through Module A → B → C pipeline
+3. **Clears GPU memory** after each clip (prevents OOM)
+4. Merges all processed clips into final video
+
+**Options:**
+- `--chunk-duration 2.0`: Duration of each clip in seconds (default: 2.0)
+- `--chunk-frames 60`: Alternative: number of frames per clip (overrides duration)
+- `--keep-temp`: Keep temporary files for debugging
+
+**Docker Command (RunPod):**
+
+To prevent PyTorch memory fragmentation, add this to your RunPod Docker Command:
+
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+```
+
+This limits memory block sizes and helps prevent OOM errors.
+
 ### Module-by-Module Execution
 
 #### Module A: Camera Extraction
