@@ -10,9 +10,10 @@ pillow>=10.0.0
 
 # Diffusion Models
 diffusers>=0.25.0
-transformers>=4.35.0
+transformers>=4.35.0  # For depth estimation (DPT) and ControlNet
 accelerate>=0.25.0
 safetensors>=0.4.0
+controlnet-aux>=0.0.7  # ControlNet preprocessors (optional)
 
 # Dust3R (install separately from GitHub)
 # git+https://github.com/naver/dust3r.git

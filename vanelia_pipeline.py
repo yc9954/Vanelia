@@ -156,44 +156,67 @@ class VaneliaPipeline:
         return render_frames
 
     def step3_composite_and_refine(self,
-                                  strength: float = 0.25,
+                                  strength: float = 0.4,
                                   seed: int = 12345,
                                   latent_blend: float = 0.15,
                                   fps: int = 30,
                                   crf: int = 18,
+                                  compositor_type: str = "controlnet",
+                                  controlnet_type: str = "depth",
                                   output_path: str = None) -> str:
         """
-        Step 3: Composite and refine using IC-Light.
+        Step 3: Composite and refine using ControlNet or IC-Light.
 
         Args:
-            strength: Denoising strength (0.2-0.3)
+            strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Fixed random seed
-            latent_blend: Latent blending ratio
+            latent_blend: Latent blending ratio (IC-Light only)
             fps: Output video FPS
             crf: Video quality (18=high)
+            compositor_type: 'controlnet' (recommended) or 'iclight'
+            controlnet_type: 'depth', 'normal', or 'canny' (ControlNet only)
             output_path: Final video output path
 
         Returns:
             Path to final video
         """
         print(f"\n{'─'*70}")
-        print("STEP 3: Compositing & Refinement (IC-Light)")
+        print(f"STEP 3: Compositing & Refinement ({compositor_type.upper()})")
         print(f"{'─'*70}\n")
 
-        from vanelia.modules.iclight_compositor import ICLightCompositor
+        if compositor_type == "controlnet":
+            from vanelia.modules.controlnet_compositor import ControlNetCompositor
 
-        # Initialize compositor
-        compositor = ICLightCompositor(device='cuda')
+            # Initialize ControlNet compositor
+            compositor = ControlNetCompositor(
+                controlnet_type=controlnet_type,
+                device='cuda'
+            )
 
-        # Process frames
-        output_frames = compositor.process_video_sequence(
-            render_dir=str(self.dirs['render_frames']),
-            background_dir=str(self.dirs['background_frames']),
-            output_dir=str(self.dirs['refined_frames']),
-            strength=strength,
-            seed=seed,
-            latent_blend_ratio=latent_blend
-        )
+            # Process frames
+            output_frames = compositor.process_video_sequence(
+                render_dir=str(self.dirs['render_frames']),
+                background_dir=str(self.dirs['background_frames']),
+                output_dir=str(self.dirs['refined_frames']),
+                strength=strength,
+                seed=seed
+            )
+
+        else:  # iclight (fallback)
+            from vanelia.modules.iclight_compositor import ICLightCompositor
+
+            # Initialize IC-Light compositor
+            compositor = ICLightCompositor(device='cuda')
+
+            # Process frames
+            output_frames = compositor.process_video_sequence(
+                render_dir=str(self.dirs['render_frames']),
+                background_dir=str(self.dirs['background_frames']),
+                output_dir=str(self.dirs['refined_frames']),
+                strength=strength,
+                seed=seed,
+                latent_blend_ratio=latent_blend
+            )
 
         # Encode video
         if output_path is None:
