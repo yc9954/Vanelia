@@ -1,0 +1,36 @@
+# Vanelia - Video Object Insertion Pipeline
+# Python 3.10+
+
+# Core Dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+pillow>=10.0.0
+
+# Diffusion Models
+diffusers>=0.25.0
+transformers>=4.35.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+
+# Dust3R (install separately from GitHub)
+# git+https://github.com/naver/dust3r.git
+
+# Optional: Performance optimizations
+xformers>=0.0.22  # For memory-efficient attention
+# triton>=2.1.0  # For faster inference
+
+# Utilities
+tqdm>=4.66.0
+einops>=0.7.0
+scipy>=1.11.0
+matplotlib>=3.8.0
+
+# Video processing
+imageio>=2.33.0
+imageio-ffmpeg>=0.4.9
+
+# Blender Python API (bpy)
+# Note: bpy is bundled with Blender installation
+# For standalone: pip install bpy (but use system Blender for best results)

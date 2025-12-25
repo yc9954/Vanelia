@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Vanelia workspace
+vanelia_workspace/
+*.mp4
+*.avi
+*.mov
+*.glb
+*.gltf
+*.obj
+*.fbx
+
+# Data directories
+data/
+output/
+render_frames/
+background_frames/
+refined_frames/
+camera_data/
+
+# Model checkpoints
+models/
+*.pth
+*.ckpt
+*.safetensors
+
+# Blender
+*.blend
+*.blend1
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
