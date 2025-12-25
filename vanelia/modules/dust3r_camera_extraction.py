@@ -91,26 +91,28 @@ class Dust3RCameraExtractor:
         print(f"[Extract] Extracted {len(frame_paths)} frames")
         return frame_paths
 
-    def opencv_to_blender_matrix(self, opencv_matrix: np.ndarray) -> np.ndarray:
+    def opencv_to_blender_matrix(self, opencv_c2w: np.ndarray) -> np.ndarray:
         """
-        Convert OpenCV camera matrix to Blender coordinate system.
+        Convert Dust3R camera-to-world matrix to Blender world-to-camera.
+
+        Dust3R outputs: Camera-to-World (c2w) in OpenCV convention
+        Blender needs: World-to-Camera (w2c) in OpenGL convention
 
         OpenCV: Right (+X), Down (+Y), Forward (+Z)
         Blender: Right (+X), Up (+Z), Back (-Y)
 
-        Transformation:
-        X_blender = X_opencv
-        Y_blender = -Z_opencv
-        Z_blender = Y_opencv
+        Steps:
+        1. Convert OpenCV c2w to Blender c2w (coordinate change)
+        2. Invert to get Blender w2c (what Blender needs)
 
         Args:
-            opencv_matrix: 4x4 camera extrinsic matrix in OpenCV format
+            opencv_c2w: 4x4 camera-to-world matrix from Dust3R (OpenCV)
 
         Returns:
-            4x4 camera matrix in Blender format
+            4x4 world-to-camera matrix in Blender format
         """
-        # Coordinate system conversion matrix
-        # This matrix transforms from OpenCV to Blender coordinates
+        # Step 1: OpenCV → Blender coordinate conversion
+        # This changes the axes while keeping c2w form
         T_blender_from_opencv = np.array([
             [1,  0,  0, 0],  # X stays the same
             [0,  0,  1, 0],  # Y becomes Z
@@ -118,10 +120,90 @@ class Dust3RCameraExtractor:
             [0,  0,  0, 1]
         ], dtype=np.float32)
 
-        # Apply transformation: C_blender = T * C_opencv
-        blender_matrix = T_blender_from_opencv @ opencv_matrix
+        # Convert to Blender coordinate system (still c2w)
+        blender_c2w = T_blender_from_opencv @ opencv_c2w @ np.linalg.inv(T_blender_from_opencv)
 
-        return blender_matrix
+        # Step 2: Invert to get world-to-camera (what Blender camera needs)
+        blender_w2c = np.linalg.inv(blender_c2w)
+
+        return blender_w2c
+
+    def detect_ground_plane(self, point_cloud: np.ndarray,
+                           ransac_threshold: float = 0.05,
+                           max_iterations: int = 1000) -> Dict:
+        """
+        Detect ground plane from point cloud using RANSAC.
+
+        Plane equation: Ax + By + Cz + D = 0
+
+        Args:
+            point_cloud: Nx3 array of 3D points
+            ransac_threshold: Distance threshold for inliers
+            max_iterations: RANSAC iterations
+
+        Returns:
+            Dictionary with plane parameters {A, B, C, D, inliers, normal}
+        """
+        if len(point_cloud) < 3:
+            return None
+
+        print(f"[RANSAC] Detecting ground plane from {len(point_cloud)} points...")
+
+        best_plane = None
+        best_inliers = 0
+
+        for _ in range(max_iterations):
+            # Randomly sample 3 points
+            idx = np.random.choice(len(point_cloud), 3, replace=False)
+            p1, p2, p3 = point_cloud[idx]
+
+            # Compute plane normal using cross product
+            v1 = p2 - p1
+            v2 = p3 - p1
+            normal = np.cross(v1, v2)
+            normal_len = np.linalg.norm(normal)
+
+            if normal_len < 1e-6:
+                continue
+
+            normal = normal / normal_len  # Normalize
+
+            # Plane equation: Ax + By + Cz + D = 0
+            # where (A, B, C) is the normal and D = -dot(normal, point)
+            A, B, C = normal
+            D = -np.dot(normal, p1)
+
+            # Compute distances from all points to plane
+            distances = np.abs(
+                A * point_cloud[:, 0] +
+                B * point_cloud[:, 1] +
+                C * point_cloud[:, 2] + D
+            )
+
+            # Count inliers
+            inliers = np.sum(distances < ransac_threshold)
+
+            if inliers > best_inliers:
+                best_inliers = inliers
+                best_plane = {
+                    'A': float(A),
+                    'B': float(B),
+                    'C': float(C),
+                    'D': float(D),
+                    'normal': normal.tolist(),
+                    'inliers': int(inliers),
+                    'inlier_ratio': float(inliers / len(point_cloud))
+                }
+
+        if best_plane:
+            print(f"[RANSAC] ✓ Ground plane found: {best_inliers}/{len(point_cloud)} inliers "
+                  f"({best_plane['inlier_ratio']*100:.1f}%)")
+            print(f"[RANSAC] Plane equation: {best_plane['A']:.3f}x + {best_plane['B']:.3f}y + "
+                  f"{best_plane['C']:.3f}z + {best_plane['D']:.3f} = 0")
+        else:
+            print("[RANSAC] WARNING: No ground plane detected")
+
+        return best_plane
 
     def run_dust3r_inference(self, frame_paths: List[str],
                             batch_size: int = 4) -> Dict:
@@ -192,6 +274,7 @@ class Dust3RCameraExtractor:
         # Convert camera poses to Blender coordinate system
         cameras_opencv = result['cameras'].cpu().numpy()
         intrinsics = result['intrinsics'].cpu().numpy()
+        pts3d = result['pts3d']  # Keep for point cloud
 
         cameras_blender = []
         for cam_matrix in cameras_opencv:
@@ -201,19 +284,47 @@ class Dust3RCameraExtractor:
             else:
                 cam_matrix_4x4 = cam_matrix
 
-            # Convert to Blender coordinates
+            # Convert to Blender coordinates (now properly inverted)
             blender_cam = self.opencv_to_blender_matrix(cam_matrix_4x4)
             cameras_blender.append(blender_cam)
 
         cameras_blender = np.array(cameras_blender)
 
+        # Extract and save point cloud
+        print("[Dust3R] Extracting point cloud...")
+        if isinstance(pts3d, torch.Tensor):
+            pts3d_np = pts3d.cpu().numpy()
+        else:
+            pts3d_np = pts3d
+
+        # Flatten point cloud from all views
+        points_list = []
+        for i, pts in enumerate(pts3d_np):
+            if len(pts.shape) == 3:  # (H, W, 3)
+                pts_flat = pts.reshape(-1, 3)
+                # Remove invalid points (NaN, Inf)
+                valid_mask = np.all(np.isfinite(pts_flat), axis=1)
+                points_list.append(pts_flat[valid_mask])
+
+        if points_list:
+            point_cloud = np.vstack(points_list)
+            print(f"[Dust3R] Point cloud size: {len(point_cloud)} points")
+        else:
+            point_cloud = np.array([])
+            print("[Dust3R] WARNING: No valid point cloud extracted")
+
+        # Detect ground plane using RANSAC
+        ground_plane = self.detect_ground_plane(point_cloud) if len(point_cloud) > 100 else None
+
         # Save results
         poses_path = output_path / "camera_poses.npy"
         intrinsics_path = output_path / "camera_intrinsics.npy"
+        pointcloud_path = output_path / "point_cloud.npy"
         metadata_path = output_path / "camera_metadata.json"
 
         np.save(poses_path, cameras_blender)
         np.save(intrinsics_path, intrinsics)
+        np.save(pointcloud_path, point_cloud)
 
         # Save metadata
         metadata = {
@@ -222,7 +333,10 @@ class Dust3RCameraExtractor:
             'frame_interval': frame_interval,
             'camera_poses_shape': cameras_blender.shape,
             'intrinsics_shape': intrinsics.shape,
+            'point_cloud_size': int(len(point_cloud)),
             'coordinate_system': 'Blender (Right, Up, Back)',
+            'coordinate_conversion': 'Camera-to-World → World-to-Camera (inverted)',
+            'ground_plane': ground_plane,
             'frame_paths': frame_paths
         }
 
@@ -232,12 +346,15 @@ class Dust3RCameraExtractor:
         print(f"\n[DONE] Camera extraction complete!")
         print(f"  - Poses saved to: {poses_path}")
         print(f"  - Intrinsics saved to: {intrinsics_path}")
+        print(f"  - Point cloud saved to: {pointcloud_path}")
         print(f"  - Metadata saved to: {metadata_path}")
-        print(f"  - Coordinate system: Blender (with T_blender_from_opencv conversion)")
+        print(f"  - Coordinate system: Blender W2C (properly inverted from Dust3R C2W)")
 
         return {
             'cameras_blender': cameras_blender,
             'intrinsics': intrinsics,
+            'point_cloud': point_cloud,
+            'ground_plane': ground_plane,
             'frame_paths': frame_paths,
             'metadata': metadata
         }

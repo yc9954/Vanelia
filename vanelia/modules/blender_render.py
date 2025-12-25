@@ -75,30 +75,61 @@ class BlenderRenderer:
         print("[Blender] ✓ Transparent RGBA rendering enabled")
 
     def load_glb_model(self, glb_path: str, scale: float = 1.0,
-                      location: tuple = (0, 0, 0)) -> bpy.types.Object:
+                      location: tuple = (0, 0, 0),
+                      rotation: tuple = (0, 0, 0)) -> bpy.types.Object:
         """
-        Load .glb model into scene.
+        Load .glb model into scene with proper material handling.
 
         Args:
             glb_path: Path to .glb file
             scale: Uniform scale factor
             location: (x, y, z) position
+            rotation: (x, y, z) rotation in radians
 
         Returns:
-            Loaded object
+            Loaded object (parent of hierarchy if multiple)
         """
         print(f"[Blender] Loading GLB: {glb_path}")
 
-        # Import GLB
-        bpy.ops.import_scene.gltf(filepath=glb_path)
+        # Import GLB with all options enabled
+        bpy.ops.import_scene.gltf(
+            filepath=glb_path,
+            import_shading='FLAT',  # Import materials as-is
+            merge_vertices=False
+        )
 
-        # Get imported object (latest object)
-        imported_obj = bpy.context.selected_objects[0]
-        imported_obj.scale = (scale, scale, scale)
-        imported_obj.location = location
+        # Get all imported objects
+        imported_objects = bpy.context.selected_objects
 
-        print(f"[Blender] ✓ Loaded: {imported_obj.name}")
-        return imported_obj
+        if not imported_objects:
+            raise RuntimeError(f"Failed to import {glb_path}")
+
+        # Find the root object (parent or first mesh)
+        root_obj = None
+        for obj in imported_objects:
+            if obj.parent is None:
+                root_obj = obj
+                break
+
+        if root_obj is None:
+            root_obj = imported_objects[0]
+
+        # Apply transformations
+        root_obj.scale = (scale, scale, scale)
+        root_obj.location = location
+        root_obj.rotation_euler = rotation
+
+        # Ensure materials use Cycles properly
+        for obj in imported_objects:
+            if obj.type == 'MESH' and obj.data.materials:
+                for mat in obj.data.materials:
+                    if mat:
+                        mat.use_nodes = True
+                        # Ensure proper viewport and render visibility
+                        mat.blend_method = 'OPAQUE'
+
+        print(f"[Blender] ✓ Loaded: {root_obj.name} ({len(imported_objects)} objects)")
+        return root_obj
 
     def create_shadow_catcher(self, size: float = 10.0) -> bpy.types.Object:
         """
@@ -213,8 +244,7 @@ class BlenderRenderer:
             frame_num = start_frame + idx
 
             # Convert numpy array to Blender Matrix
-            # Dust3R outputs camera-to-world, Blender uses world-to-camera
-            # So we need to invert the matrix
+            # NOTE: Matrix is already world-to-camera (inverted in dust3r_camera_extraction.py)
             cam_matrix = Matrix(pose_matrix.tolist())
 
             # Blender camera looks down -Z axis, apply correction if needed
@@ -228,28 +258,54 @@ class BlenderRenderer:
 
         print(f"[Blender] ✓ Animation: frames {start_frame}-{scene.frame_end}")
 
-    def setup_lighting(self, energy: float = 5.0):
+    def setup_lighting(self, use_world_hdri: bool = True,
+                      hdri_strength: float = 1.0,
+                      sun_energy: float = 5.0):
         """
-        Create basic lighting setup.
+        Create realistic lighting setup with environment lighting.
 
         Args:
-            energy: Light intensity
+            use_world_hdri: Use procedural sky/environment lighting
+            hdri_strength: Environment lighting strength
+            sun_energy: Sun light intensity
         """
         print("[Blender] Setting up lighting...")
 
-        # Key light
-        bpy.ops.object.light_add(type='AREA', location=(5, -5, 5))
-        key_light = bpy.context.active_object
-        key_light.data.energy = energy
-        key_light.data.size = 5
+        # Setup world environment lighting (replaces HDRI for simplicity)
+        world = bpy.context.scene.world
+        world.use_nodes = True
+        nodes = world.node_tree.nodes
+        links = world.node_tree.links
 
-        # Fill light
-        bpy.ops.object.light_add(type='AREA', location=(-5, -5, 3))
-        fill_light = bpy.context.active_object
-        fill_light.data.energy = energy * 0.5
-        fill_light.data.size = 5
+        # Clear existing nodes
+        nodes.clear()
 
-        print("[Blender] ✓ Lighting setup complete")
+        # Background shader with sky texture
+        node_background = nodes.new(type='ShaderNodeBackground')
+        node_output = nodes.new(type='ShaderNodeOutputWorld')
+
+        if use_world_hdri:
+            # Add Sky Texture for outdoor/realistic lighting
+            node_sky = nodes.new(type='ShaderNodeTexSky')
+            node_sky.sky_type = 'NISHITA'  # Physically-based sky
+            node_sky.sun_elevation = np.radians(45)  # 45-degree sun
+            node_sky.sun_rotation = 0
+            node_sky.ground_albedo = 0.3
+
+            links.new(node_sky.outputs['Color'], node_background.inputs['Color'])
+
+        node_background.inputs['Strength'].default_value = hdri_strength
+
+        links.new(node_background.outputs['Background'], node_output.inputs['Surface'])
+
+        # Add sun light for shadows
+        bpy.ops.object.light_add(type='SUN', location=(0, 0, 10))
+        sun = bpy.context.active_object
+        sun.data.energy = sun_energy
+        sun.rotation_euler = (np.radians(45), 0, np.radians(45))
+
+        print(f"[Blender] ✓ Lighting: World environment + Sun (strength={hdri_strength})")
+
 
     def render_animation(self, output_dir: str, file_prefix: str = "frame_"):
         """
@@ -295,10 +351,17 @@ def parse_args():
     parser.add_argument("--glb", type=str, required=True, help="Path to .glb model")
     parser.add_argument("--poses", type=str, required=True, help="Path to camera_poses.npy")
     parser.add_argument("--intrinsics", type=str, required=True, help="Path to camera_intrinsics.npy")
+    parser.add_argument("--metadata", type=str, default=None, help="Path to camera_metadata.json")
     parser.add_argument("--output", type=str, required=True, help="Output directory")
     parser.add_argument("--scale", type=float, default=1.0, help="Model scale")
+    parser.add_argument("--position", type=float, nargs=3, default=[0, 0, 0],
+                       help="Object position (x y z)")
+    parser.add_argument("--rotation", type=float, nargs=3, default=[0, 0, 0],
+                       help="Object rotation in degrees (x y z)")
     parser.add_argument("--resolution", type=int, nargs=2, default=[1920, 1080],
                        help="Resolution (width height)")
+    parser.add_argument("--auto-ground", action='store_true',
+                       help="Automatically place object on detected ground plane")
 
     return parser.parse_args(argv)
 
@@ -318,18 +381,54 @@ def main():
     intrinsics = np.load(args.intrinsics)
     print(f"[Load] ✓ Loaded {len(poses)} camera poses\n")
 
+    # Load metadata for ground plane info
+    ground_plane = None
+    if args.metadata:
+        import json
+        with open(args.metadata, 'r') as f:
+            metadata = json.load(f)
+            ground_plane = metadata.get('ground_plane')
+            if ground_plane:
+                print(f"[Load] Ground plane: {ground_plane['A']:.3f}x + {ground_plane['B']:.3f}y + "
+                      f"{ground_plane['C']:.3f}z + {ground_plane['D']:.3f} = 0")
+
+    # Determine object placement
+    obj_position = tuple(args.position)
+    obj_rotation = tuple(np.radians(args.rotation))  # Convert degrees to radians
+
+    if args.auto_ground and ground_plane:
+        # Place object on ground plane at (x, y) = (0, 0)
+        # Solve for z: z = -(A*x + B*y + D) / C
+        A, B, C, D = ground_plane['A'], ground_plane['B'], ground_plane['C'], ground_plane['D']
+        x, y = obj_position[0], obj_position[1]
+        if abs(C) > 1e-6:
+            z_ground = -(A * x + B * y + D) / C
+            obj_position = (x, y, z_ground)
+            print(f"[Auto-Ground] Placing object at ({x:.2f}, {y:.2f}, {z_ground:.2f})")
+        else:
+            print("[Auto-Ground] WARNING: Ground plane is vertical, using manual position")
+
     # Initialize renderer
     renderer = BlenderRenderer()
     renderer.setup_render_settings(args.resolution[0], args.resolution[1])
 
-    # Load 3D model
-    model_obj = renderer.load_glb_model(args.glb, scale=args.scale)
+    # Load 3D model with position and rotation
+    model_obj = renderer.load_glb_model(
+        args.glb,
+        scale=args.scale,
+        location=obj_position,
+        rotation=obj_rotation
+    )
 
-    # Setup shadow catcher
-    renderer.create_shadow_catcher(size=20.0)
+    # Setup shadow catcher (aligned with ground plane if available)
+    if ground_plane:
+        # TODO: Rotate shadow catcher to match ground plane normal
+        renderer.create_shadow_catcher(size=20.0)
+    else:
+        renderer.create_shadow_catcher(size=20.0)
 
-    # Setup lighting
-    renderer.setup_lighting(energy=10.0)
+    # Setup realistic lighting
+    renderer.setup_lighting(use_world_hdri=True, hdri_strength=1.0, sun_energy=5.0)
 
     # Setup camera
     camera = renderer.setup_camera()

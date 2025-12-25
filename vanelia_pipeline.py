@@ -97,7 +97,10 @@ class VaneliaPipeline:
 
     def step2_render_object(self, glb_path: str,
                           model_scale: float = 1.0,
-                          resolution: tuple = (1920, 1080)) -> list:
+                          resolution: tuple = (1920, 1080),
+                          position: tuple = (0, 0, 0),
+                          rotation: tuple = (0, 0, 0),
+                          auto_ground: bool = True) -> list:
         """
         Step 2: Render 3D model using Blender.
 
@@ -105,6 +108,9 @@ class VaneliaPipeline:
             glb_path: Path to .glb model
             model_scale: Model scale factor
             resolution: Output resolution (width, height)
+            position: Object position (x, y, z)
+            rotation: Object rotation in degrees (x, y, z)
+            auto_ground: Automatically place on detected ground plane
 
         Returns:
             List of rendered frame paths
@@ -115,6 +121,7 @@ class VaneliaPipeline:
 
         poses_path = self.dirs['camera_data'] / 'camera_poses.npy'
         intrinsics_path = self.dirs['camera_data'] / 'camera_intrinsics.npy'
+        metadata_path = self.dirs['camera_data'] / 'camera_metadata.json'
 
         if not poses_path.exists():
             raise FileNotFoundError(f"Camera poses not found: {poses_path}")
@@ -130,10 +137,16 @@ class VaneliaPipeline:
             '--glb', glb_path,
             '--poses', str(poses_path),
             '--intrinsics', str(intrinsics_path),
+            '--metadata', str(metadata_path),
             '--output', str(self.dirs['render_frames']),
             '--scale', str(model_scale),
+            '--position', str(position[0]), str(position[1]), str(position[2]),
+            '--rotation', str(rotation[0]), str(rotation[1]), str(rotation[2]),
             '--resolution', str(resolution[0]), str(resolution[1])
         ]
+
+        if auto_ground:
+            cmd.append('--auto-ground')
 
         print(f"Running Blender...\n")
         result = subprocess.run(cmd, check=True)
@@ -203,6 +216,9 @@ class VaneliaPipeline:
                          frame_interval: int = 1,
                          max_frames: int = None,
                          model_scale: float = 1.0,
+                         position: tuple = (0, 0, 0),
+                         rotation: tuple = (0, 0, 0),
+                         auto_ground: bool = True,
                          resolution: tuple = (1920, 1080),
                          strength: float = 0.25,
                          seed: int = 12345,
@@ -219,6 +235,9 @@ class VaneliaPipeline:
             frame_interval: Frame sampling
             max_frames: Max frames to process
             model_scale: 3D model scale
+            position: Object position (x, y, z)
+            rotation: Object rotation in degrees (x, y, z)
+            auto_ground: Auto-place on detected ground
             resolution: Output resolution
             strength: IC-Light denoising strength
             seed: Random seed (fixed for consistency)
@@ -242,6 +261,9 @@ class VaneliaPipeline:
         self.step2_render_object(
             glb_path=glb_path,
             model_scale=model_scale,
+            position=position,
+            rotation=rotation,
+            auto_ground=auto_ground,
             resolution=resolution
         )
 
@@ -306,6 +328,12 @@ Examples:
     # Rendering settings
     parser.add_argument('--model-scale', type=float, default=1.0,
                        help='3D model scale (default: 1.0)')
+    parser.add_argument('--position', type=float, nargs=3, default=[0, 0, 0],
+                       help='Object position x y z (default: 0 0 0)')
+    parser.add_argument('--rotation', type=float, nargs=3, default=[0, 0, 0],
+                       help='Object rotation in degrees x y z (default: 0 0 0)')
+    parser.add_argument('--no-auto-ground', action='store_true',
+                       help='Disable automatic ground placement (default: enabled)')
     parser.add_argument('--resolution', type=int, nargs=2, default=[1920, 1080],
                        help='Output resolution (default: 1920 1080)')
 
@@ -346,6 +374,9 @@ Examples:
             frame_interval=args.frame_interval,
             max_frames=args.max_frames,
             model_scale=args.model_scale,
+            position=tuple(args.position),
+            rotation=tuple(args.rotation),
+            auto_ground=not args.no_auto_ground,
             resolution=tuple(args.resolution),
             strength=args.strength,
             seed=args.seed,
