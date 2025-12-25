@@ -56,8 +56,19 @@ class BlenderRenderer:
 
         scene = bpy.context.scene
         scene.render.engine = 'CYCLES'
+
+        # GPU Optimization
+        prefs = bpy.context.preferences.addons['cycles'].preferences
+        prefs.compute_device_type = 'CUDA'  # Try CUDA first
+
+        # Enable all available GPUs
+        for device in prefs.devices:
+            if device.type in {'CUDA', 'OPTIX', 'HIP'}:
+                device.use = True
+
         scene.cycles.device = 'GPU'
-        scene.cycles.samples = 128  # High quality
+
+        # Render settings
         scene.render.resolution_x = resolution_x
         scene.render.resolution_y = resolution_y
         scene.render.resolution_percentage = 100
@@ -68,11 +79,27 @@ class BlenderRenderer:
         scene.render.image_settings.color_mode = 'RGBA'
         scene.render.image_settings.color_depth = '8'
 
-        # Enable denoising for cleaner output
+        # Quality vs Speed optimization
+        scene.cycles.samples = 64  # Reduced from 128 (Optix denoiser compensates)
+        scene.cycles.use_adaptive_sampling = True
+        scene.cycles.adaptive_threshold = 0.01
+
+        # Denoising (try Optix for RTX GPUs, fallback to OIDN)
+        try:
+            scene.cycles.denoiser = 'OPTIX'  # Fastest on RTX GPUs
+            print("[Blender] ✓ Using Optix denoiser (RTX optimized)")
+        except:
+            scene.cycles.denoiser = 'OPENIMAGEDENOISE'
+            print("[Blender] ✓ Using OpenImageDenoise")
+
         scene.cycles.use_denoising = True
         scene.view_layers[0].cycles.use_denoising = True
 
-        print("[Blender] ✓ Transparent RGBA rendering enabled")
+        # Tile size for GPU rendering
+        scene.render.tile_x = 256
+        scene.render.tile_y = 256
+
+        print(f"[Blender] ✓ Transparent RGBA rendering enabled ({resolution_x}x{resolution_y})")
 
     def load_glb_model(self, glb_path: str, scale: float = 1.0,
                       location: tuple = (0, 0, 0),
@@ -91,11 +118,12 @@ class BlenderRenderer:
         """
         print(f"[Blender] Loading GLB: {glb_path}")
 
-        # Import GLB with all options enabled
+        # Import GLB with PBR material preservation
         bpy.ops.import_scene.gltf(
             filepath=glb_path,
-            import_shading='FLAT',  # Import materials as-is
-            merge_vertices=False
+            import_shading='NORMALS',  # ✅ Preserve PBR nodes
+            merge_vertices=False,
+            bone_heuristic='TEMPERANCE'
         )
 
         # Get all imported objects
@@ -119,14 +147,29 @@ class BlenderRenderer:
         root_obj.location = location
         root_obj.rotation_euler = rotation
 
-        # Ensure materials use Cycles properly
+        # Validate and fix materials
+        mat_fixed_count = 0
         for obj in imported_objects:
             if obj.type == 'MESH' and obj.data.materials:
-                for mat in obj.data.materials:
-                    if mat:
-                        mat.use_nodes = True
-                        # Ensure proper viewport and render visibility
+                for slot in obj.material_slots:
+                    mat = slot.material
+                    if mat and mat.use_nodes:
+                        nodes = mat.node_tree.nodes
+                        bsdf = nodes.get('Principled BSDF')
+
+                        if bsdf:
+                            # Fix black materials (Base Color too dark)
+                            base_color = bsdf.inputs['Base Color'].default_value
+                            if base_color[0] < 0.05 and base_color[1] < 0.05 and base_color[2] < 0.05:
+                                bsdf.inputs['Base Color'].default_value = (0.8, 0.8, 0.8, 1.0)
+                                mat_fixed_count += 1
+
+                        # Ensure proper rendering
                         mat.blend_method = 'OPAQUE'
+                        mat.shadow_method = 'OPAQUE'
+
+        if mat_fixed_count > 0:
+            print(f"[Blender] ⚠ Fixed {mat_fixed_count} black materials")
 
         print(f"[Blender] ✓ Loaded: {root_obj.name} ({len(imported_objects)} objects)")
         return root_obj
@@ -258,9 +301,64 @@ class BlenderRenderer:
 
         print(f"[Blender] ✓ Animation: frames {start_frame}-{scene.frame_end}")
 
+    def estimate_lighting_from_image(self, image_path: str) -> dict:
+        """
+        Estimate lighting direction and color from background image.
+
+        Args:
+            image_path: Path to background image
+
+        Returns:
+            Dictionary with sun_azimuth, sun_elevation, and color
+        """
+        import cv2
+        from scipy.ndimage import gaussian_filter
+
+        try:
+            img = cv2.imread(image_path)
+            if img is None:
+                return None
+
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+            # Find bright regions (light sources)
+            brightness = img_hsv[:, :, 2].astype(np.float32)
+            smooth_bright = gaussian_filter(brightness, sigma=20)
+
+            # Find brightest point
+            max_loc = np.unravel_index(smooth_bright.argmax(), smooth_bright.shape)
+
+            # Calculate angle from center
+            h, w = img.shape[:2]
+            dx = max_loc[1] - w/2
+            dy = max_loc[0] - h/2
+
+            sun_azimuth = float(np.arctan2(dy, dx))
+            sun_elevation = np.radians(45)  # Default elevation
+
+            # Estimate color temperature from bright regions
+            bright_mask = smooth_bright > np.percentile(smooth_bright, 90)
+            bright_pixels = img_rgb[bright_mask]
+
+            if len(bright_pixels) > 0:
+                avg_color = np.mean(bright_pixels, axis=0) / 255.0
+            else:
+                avg_color = np.array([1.0, 1.0, 1.0])
+
+            return {
+                'sun_azimuth': sun_azimuth,
+                'sun_elevation': sun_elevation,
+                'color': tuple(avg_color.tolist())
+            }
+        except Exception as e:
+            print(f"[Lighting] Failed to estimate from image: {e}")
+            return None
+
     def setup_lighting(self, use_world_hdri: bool = True,
                       hdri_strength: float = 1.0,
-                      sun_energy: float = 5.0):
+                      sun_energy: float = 5.0,
+                      bg_image_path: str = None):
         """
         Create realistic lighting setup with environment lighting.
 
@@ -268,10 +366,18 @@ class BlenderRenderer:
             use_world_hdri: Use procedural sky/environment lighting
             hdri_strength: Environment lighting strength
             sun_energy: Sun light intensity
+            bg_image_path: Background image for lighting estimation
         """
         print("[Blender] Setting up lighting...")
 
-        # Setup world environment lighting (replaces HDRI for simplicity)
+        # Estimate lighting from background image
+        lighting_info = None
+        if bg_image_path:
+            lighting_info = self.estimate_lighting_from_image(bg_image_path)
+            if lighting_info:
+                print(f"[Blender] ✓ Estimated lighting from background")
+
+        # Setup world environment lighting
         world = bpy.context.scene.world
         world.use_nodes = True
         nodes = world.node_tree.nodes
@@ -288,8 +394,15 @@ class BlenderRenderer:
             # Add Sky Texture for outdoor/realistic lighting
             node_sky = nodes.new(type='ShaderNodeTexSky')
             node_sky.sky_type = 'NISHITA'  # Physically-based sky
-            node_sky.sun_elevation = np.radians(45)  # 45-degree sun
-            node_sky.sun_rotation = 0
+
+            # Use estimated lighting if available
+            if lighting_info:
+                node_sky.sun_rotation = lighting_info['sun_azimuth']
+                node_sky.sun_elevation = lighting_info['sun_elevation']
+            else:
+                node_sky.sun_elevation = np.radians(45)
+                node_sky.sun_rotation = 0
+
             node_sky.ground_albedo = 0.3
 
             links.new(node_sky.outputs['Color'], node_background.inputs['Color'])
@@ -302,7 +415,18 @@ class BlenderRenderer:
         bpy.ops.object.light_add(type='SUN', location=(0, 0, 10))
         sun = bpy.context.active_object
         sun.data.energy = sun_energy
-        sun.rotation_euler = (np.radians(45), 0, np.radians(45))
+
+        # Use estimated lighting direction
+        if lighting_info:
+            sun.rotation_euler = (
+                lighting_info['sun_elevation'],
+                0,
+                lighting_info['sun_azimuth']
+            )
+            # Apply color temperature
+            sun.data.color = lighting_info['color']
+        else:
+            sun.rotation_euler = (np.radians(45), 0, np.radians(45))
 
         print(f"[Blender] ✓ Lighting: World environment + Sun (strength={hdri_strength})")
 
@@ -381,8 +505,9 @@ def main():
     intrinsics = np.load(args.intrinsics)
     print(f"[Load] ✓ Loaded {len(poses)} camera poses\n")
 
-    # Load metadata for ground plane info
+    # Load metadata for ground plane info and background frames
     ground_plane = None
+    bg_image = None
     if args.metadata:
         import json
         with open(args.metadata, 'r') as f:
@@ -391,6 +516,11 @@ def main():
             if ground_plane:
                 print(f"[Load] Ground plane: {ground_plane['A']:.3f}x + {ground_plane['B']:.3f}y + "
                       f"{ground_plane['C']:.3f}z + {ground_plane['D']:.3f} = 0")
+
+            # Get first background frame for lighting estimation
+            frame_paths = metadata.get('frame_paths', [])
+            if frame_paths:
+                bg_image = frame_paths[0]
 
     # Determine object placement
     obj_position = tuple(args.position)
@@ -427,8 +557,13 @@ def main():
     else:
         renderer.create_shadow_catcher(size=20.0)
 
-    # Setup realistic lighting
-    renderer.setup_lighting(use_world_hdri=True, hdri_strength=1.0, sun_energy=5.0)
+    # Setup realistic lighting (with background image estimation)
+    renderer.setup_lighting(
+        use_world_hdri=True,
+        hdri_strength=1.0,
+        sun_energy=5.0,
+        bg_image_path=bg_image
+    )
 
     # Setup camera
     camera = renderer.setup_camera()

@@ -22,9 +22,9 @@ xformers>=0.0.22  # For memory-efficient attention
 # triton>=2.1.0  # For faster inference
 
 # Utilities
-tqdm>=4.66.0
+tqdm>=4.66.0  # Progress bars
 einops>=0.7.0
-scipy>=1.11.0
+scipy>=1.11.0  # For lighting estimation (gaussian_filter)
 matplotlib>=3.8.0
 
 # Video processing

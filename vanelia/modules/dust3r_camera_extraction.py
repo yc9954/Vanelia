@@ -45,8 +45,22 @@ class Dust3RCameraExtractor:
             # Use default model (will download if not exists)
             model_path = "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
 
-        self.model = AsymmetricCroCo3DStereo.from_pretrained(model_path).to(device)
-        print("[Dust3R] Model loaded successfully")
+        try:
+            self.model = AsymmetricCroCo3DStereo.from_pretrained(model_path).to(device)
+            print("[Dust3R] ✓ Model loaded successfully")
+        except Exception as e:
+            print(f"[Dust3R] ⚠ Failed to load model from {model_path}")
+            print(f"[Dust3R] Error: {str(e)[:100]}")
+            print("[Dust3R] Retrying with trust_remote_code=True...")
+            try:
+                self.model = AsymmetricCroCo3DStereo.from_pretrained(
+                    model_path,
+                    trust_remote_code=True
+                ).to(device)
+                print("[Dust3R] ✓ Model loaded (alternative method)")
+            except Exception as e2:
+                print(f"[Dust3R] ✗ Failed to load model: {e2}")
+                raise RuntimeError(f"Could not load Dust3R model. Please check installation.") from e2
 
     def extract_frames(self, video_path: str, output_dir: str,
                       frame_interval: int = 1, max_frames: int = None) -> List[str]:

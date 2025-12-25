@@ -207,7 +207,17 @@ class ICLightCompositor:
         output_paths = []
         previous_latent = None
 
-        for idx, (render_path, bg_path) in enumerate(zip(render_frames, bg_frames)):
+        # Import tqdm for progress bar
+        try:
+            from tqdm import tqdm
+            frame_iter = tqdm(enumerate(zip(render_frames, bg_frames)),
+                            total=num_frames,
+                            desc="IC-Light Processing",
+                            unit="frame")
+        except ImportError:
+            frame_iter = enumerate(zip(render_frames, bg_frames))
+
+        for idx, (render_path, bg_path) in frame_iter:
             # Process frame
             output_img, current_latent = self.process_frame(
                 foreground_path=str(render_path),
@@ -225,12 +235,19 @@ class ICLightCompositor:
             output_img.save(output_path)
             output_paths.append(output_path)
 
-            # Update previous latent for next frame
-            previous_latent = current_latent
+            # Memory optimization: Move latent to CPU
+            if previous_latent is not None:
+                del previous_latent
+            previous_latent = current_latent.cpu()
 
-            # Progress
-            progress = ((idx + 1) / num_frames) * 100
-            print(f"  [{progress:5.1f}%] Frame {idx+1}/{num_frames} → {output_path}")
+            # Clear CUDA cache periodically
+            if idx % 10 == 0:
+                torch.cuda.empty_cache()
+
+            # Progress (fallback for no tqdm)
+            if 'tqdm' not in sys.modules:
+                progress = ((idx + 1) / num_frames) * 100
+                print(f"  [{progress:5.1f}%] Frame {idx+1}/{num_frames} → {output_path}")
 
         print(f"\n[IC-Light] ✓ Refined {num_frames} frames")
         return output_paths
