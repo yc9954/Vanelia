@@ -243,7 +243,9 @@ class VaneliaPipeline:
                          rotation: tuple = (0, 0, 0),
                          auto_ground: bool = True,
                          resolution: tuple = (1920, 1080),
-                         strength: float = 0.25,
+                         compositor_type: str = "controlnet",
+                         controlnet_type: str = "depth",
+                         strength: float = 0.4,
                          seed: int = 12345,
                          latent_blend: float = 0.15,
                          fps: int = 30,
@@ -262,9 +264,11 @@ class VaneliaPipeline:
             rotation: Object rotation in degrees (x, y, z)
             auto_ground: Auto-place on detected ground
             resolution: Output resolution
-            strength: IC-Light denoising strength
+            compositor_type: Compositor to use ('controlnet' or 'iclight')
+            controlnet_type: ControlNet type ('depth', 'normal', 'canny')
+            strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Random seed (fixed for consistency)
-            latent_blend: Temporal latent blending
+            latent_blend: Temporal latent blending (IC-Light only)
             fps: Output FPS
             crf: Video quality
 
@@ -292,6 +296,8 @@ class VaneliaPipeline:
 
         # Step 3: Compositing & Refinement
         final_video = self.step3_composite_and_refine(
+            compositor_type=compositor_type,
+            controlnet_type=controlnet_type,
             strength=strength,
             seed=seed,
             latent_blend=latent_blend,
@@ -319,8 +325,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
+  # Basic usage (ControlNet-Depth, recommended)
   python vanelia_pipeline.py --input video.mp4 --model product.glb --output final.mp4
+
+  # Use IC-Light compositor instead
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --compositor-type iclight --strength 0.25 --output final.mp4
+
+  # Use ControlNet-Normal for better surface detail
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --controlnet-type normal --strength 0.4 --output final.mp4
 
   # Process every 2nd frame, max 100 frames
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
@@ -328,7 +342,7 @@ Examples:
 
   # High quality settings
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --strength 0.2 --crf 15 --fps 60 --output final.mp4
+      --strength 0.35 --crf 15 --fps 60 --output final.mp4
         """
     )
 
@@ -360,13 +374,19 @@ Examples:
     parser.add_argument('--resolution', type=int, nargs=2, default=[1920, 1080],
                        help='Output resolution (default: 1920 1080)')
 
-    # IC-Light settings
-    parser.add_argument('--strength', type=float, default=0.25,
-                       help='IC-Light denoising strength (default: 0.25, range: 0.2-0.3)')
+    # Compositing settings
+    parser.add_argument('--compositor-type', type=str, default='controlnet',
+                       choices=['controlnet', 'iclight'],
+                       help='Compositor to use (default: controlnet, recommended)')
+    parser.add_argument('--controlnet-type', type=str, default='depth',
+                       choices=['depth', 'normal', 'canny'],
+                       help='ControlNet type (default: depth, only used with --compositor-type controlnet)')
+    parser.add_argument('--strength', type=float, default=0.4,
+                       help='Denoising strength (default: 0.4 for ControlNet, use 0.25 for IC-Light)')
     parser.add_argument('--seed', type=int, default=12345,
                        help='Random seed for consistency (default: 12345)')
     parser.add_argument('--latent-blend', type=float, default=0.15,
-                       help='Latent blending ratio (default: 0.15, range: 0.0-0.2)')
+                       help='Latent blending ratio for IC-Light (default: 0.15, range: 0.0-0.2)')
 
     # Video encoding
     parser.add_argument('--fps', type=int, default=30,
@@ -385,6 +405,15 @@ Examples:
         print(f"ERROR: 3D model not found: {args.model}")
         sys.exit(1)
 
+    # Parameter validation warnings
+    if args.compositor_type == 'controlnet' and args.strength < 0.3:
+        print(f"⚠ WARNING: Strength {args.strength} is low for ControlNet (recommended: 0.3-0.5)")
+        print(f"  Consider using --strength 0.4 for better results")
+
+    if args.compositor_type == 'iclight' and args.strength > 0.35:
+        print(f"⚠ WARNING: Strength {args.strength} is high for IC-Light (recommended: 0.2-0.3)")
+        print(f"  High strength may cause flickering. Consider using --strength 0.25")
+
     # Initialize pipeline
     pipeline = VaneliaPipeline(workspace=args.workspace)
 
@@ -401,6 +430,8 @@ Examples:
             rotation=tuple(args.rotation),
             auto_ground=not args.no_auto_ground,
             resolution=tuple(args.resolution),
+            compositor_type=args.compositor_type,
+            controlnet_type=args.controlnet_type,
             strength=args.strength,
             seed=args.seed,
             latent_blend=args.latent_blend,

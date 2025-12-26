@@ -7,6 +7,7 @@ IC-Light Repository: https://github.com/lllyasviel/IC-Light
 """
 
 import os
+import sys
 import cv2
 import numpy as np
 import torch
