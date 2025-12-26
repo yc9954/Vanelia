@@ -4,8 +4,12 @@
 
 ### Architecture Overview
 ```
-Video → Dust3R (Camera) → Blender (Render) → IC-Light (Relight) → Final Video
+Video → Dust3R (Camera) → Blender (Render) → ControlNet-Depth (Composite) → Final Video
+                                           ↘ IC-Light (Fallback, 비추천)
 ```
+
+**Note**: ControlNet-Depth가 primary compositor (controlnet_compositor.py)
+- IC-Light는 HuggingFace에서 직접 사용 불가 (특수 conditioning 필요)
 
 ---
 
@@ -237,11 +241,29 @@ def optimize_gpu_settings(self):
 
 ### 3️⃣ Module C: IC-Light Compositing
 
-#### ✅ 장점
-- Relighting 품질 좋음
+⚠️ **CRITICAL LIMITATION**: IC-Light는 표준 HuggingFace 파이프라인으로 직접 사용 불가
+- IC-Light는 특수한 foreground conditioning (FC mode)이 필요
+- HuggingFace diffusers로는 이 conditioning을 제공할 수 없음
+- **해결책**: ControlNet-Depth를 primary compositor로 사용 (controlnet_compositor.py)
+
+#### ✅ 장점 (이론상)
+- Relighting 품질 좋음 (제대로 setup 시)
 - Fixed seed로 일관성 유지
 
 #### ❌ 문제점 및 개선안
+
+**문제 0: HuggingFace에서 직접 사용 불가 (가장 큰 문제)**
+```python
+# 현재 구현 (iclight_compositor.py:47)은 IC-Light의 본래 기능을 사용하지 못함
+# IC-Light는 "foreground conditioning" 이미지가 필요한데
+# 표준 StableDiffusionImg2ImgPipeline으로는 이를 제공할 수 없음
+
+# ✅ 해결책: ControlNet 사용
+# controlnet_compositor.py에서 depth-guided compositing으로 대체
+# - HuggingFace에서 바로 사용 가능
+# - Depth map으로 geometry 제어
+# - 더 안정적인 결과
+```
 
 **문제 1: IC-Light SD1.5 기반 (구형)**
 ```python

@@ -8,7 +8,8 @@ Vanelia is a complete pipeline for inserting 3D models (.glb) into user videos u
 
 - **Dust3R**: Camera tracking and pose estimation
 - **Blender 4.0**: Headless 3D rendering with shadow catcher
-- **IC-Light**: Photorealistic relighting and compositing with temporal consistency
+- **ControlNet**: Depth-guided compositing with temporal consistency (recommended)
+- **IC-Light**: Alternative relighting compositor (fallback)
 
 Designed for **RunPod NVIDIA A100 (80GB)** servers with CUDA 12.1.
 
@@ -28,10 +29,12 @@ Input Video (.mp4)
     + 3D Model (.glb)
     → render_frames/ (RGBA with transparent background)
     ↓
-[Module C] IC-Light Compositing
+[Module C] ControlNet Depth Compositing (recommended)
     + background_frames/
-    → Temporal-consistent refinement
+    → Depth-guided refinement with temporal consistency
     → final_output.mp4
+
+Alternative: IC-Light Compositing (fallback)
 ```
 
 ---
@@ -136,7 +139,25 @@ blender --background --python vanelia/modules/blender_render.py -- \
 
 **Output**: RGBA images with transparent background and shadow catcher.
 
-#### Module C: IC-Light Compositing
+#### Module C: ControlNet Compositing (Recommended)
+
+```bash
+python vanelia/modules/controlnet_compositor.py \
+    --render-dir render_frames/ \
+    --bg-dir background_frames/ \
+    --output-dir refined_frames/ \
+    --video-output final_output.mp4 \
+    --controlnet-type depth \
+    --strength 0.4 \
+    --seed 12345
+```
+
+**Key Settings**:
+- `--controlnet-type depth`: Depth-guided compositing (also supports: normal, canny)
+- `--strength 0.4`: Denoising strength (0.3-0.5 for ControlNet)
+- `--seed 12345`: Fixed seed (consistent noise pattern)
+
+**Alternative: IC-Light Compositing (fallback)**
 
 ```bash
 python vanelia/modules/iclight_compositor.py \
@@ -149,10 +170,7 @@ python vanelia/modules/iclight_compositor.py \
     --latent-blend 0.15
 ```
 
-**Anti-Flicker Settings**:
-- `--strength 0.25`: Low denoising (preserves geometry)
-- `--seed 12345`: Fixed seed (consistent noise pattern)
-- `--latent-blend 0.15`: Temporal latent blending
+Note: IC-Light requires special foreground conditioning not available via standard HuggingFace pipelines. Use ControlNet for reliable results.
 
 ---
 
@@ -177,12 +195,21 @@ Without this conversion, rendered objects will appear **upside-down or mirrored*
 
 ### Temporal Consistency
 
-IC-Light compositor prevents flickering through:
+Both compositors prevent flickering through consistent settings:
 
+**ControlNet (Recommended)**:
+1. **Fixed Seed**: Same random seed for all frames
+2. **Depth Guidance**: Geometric constraints from depth map (Intel/dpt-large)
+3. **Moderate Denoising**: 0.3-0.5 strength with ControlNet conditioning
+4. **UniPC Scheduler**: Fast, deterministic diffusion steps
+
+**IC-Light (Fallback)**:
 1. **Fixed Seed**: Same random seed for all frames
 2. **Low Denoising Strength**: 0.2-0.3 (preserves Blender's geometry)
 3. **Latent Blending**: 10-20% of previous frame's latent mixed in
 4. **DDIM Scheduler**: Deterministic diffusion steps
+
+Note: ControlNet provides better geometric consistency through depth guidance.
 
 ### Shadow Catcher
 
@@ -192,6 +219,22 @@ Blender renders objects with realistic shadows on an invisible ground plane:
 plane.is_shadow_catcher = True  # Invisible but receives shadows
 scene.render.film_transparent = True  # RGBA output
 ```
+
+### Why ControlNet Instead of IC-Light?
+
+**IC-Light Limitations**:
+- Requires special foreground conditioning images (FC mode)
+- Not directly available via standard HuggingFace diffusers pipelines
+- Complex setup requiring custom preprocessing
+
+**ControlNet Advantages**:
+- Works directly with HuggingFace diffusers (plug-and-play)
+- Depth guidance provides better geometric consistency
+- Multiple control types available (depth, normal, canny)
+- Well-documented and actively maintained
+- Automatic depth estimation using Intel DPT-Large
+
+**Result**: ControlNet provides more reliable and consistent compositing with simpler implementation.
 
 ---
 
@@ -203,7 +246,8 @@ Vanelia/
 │   ├── modules/
 │   │   ├── dust3r_camera_extraction.py   # Module A
 │   │   ├── blender_render.py             # Module B
-│   │   └── iclight_compositor.py         # Module C
+│   │   ├── controlnet_compositor.py      # Module C (recommended)
+│   │   └── iclight_compositor.py         # Module C (fallback)
 │   └── __init__.py
 ├── scripts/
 │   ├── install_blender.sh
@@ -244,18 +288,22 @@ Vanelia/
 **Tested on NVIDIA A100 (80GB)**:
 
 - Dust3R: ~0.5s/frame
-- Blender: ~2-5s/frame (Cycles 128 samples)
+- Blender: ~2-5s/frame (Cycles 64 samples with Optix)
+- ControlNet: ~1.8s/frame (20 steps, depth guidance)
 - IC-Light: ~1.5s/frame (20 steps, strength 0.25)
 
-**Total**: ~4-7s per frame (100 frames ≈ 10-12 minutes)
+**Total (ControlNet)**: ~4.3-7.3s per frame (100 frames ≈ 7-12 minutes)
+**Total (IC-Light)**: ~4-7s per frame (100 frames ≈ 7-12 minutes)
 
 ---
 
 ## Credits
 
 - **Dust3R**: [naver/dust3r](https://github.com/naver/dust3r)
+- **ControlNet**: [lllyasviel/ControlNet](https://github.com/lllyasviel/ControlNet)
 - **IC-Light**: [lllyasviel/IC-Light](https://github.com/lllyasviel/IC-Light)
 - **Blender**: [blender.org](https://www.blender.org/)
+- **Depth Estimation**: Intel DPT-Large via HuggingFace Transformers
 
 ---
 
