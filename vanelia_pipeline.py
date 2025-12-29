@@ -125,6 +125,7 @@ class VaneliaPipeline:
 
         poses_path = self.dirs['camera_data'] / 'camera_poses.npy'
         intrinsics_path = self.dirs['camera_data'] / 'camera_intrinsics.npy'
+        metadata_path = self.dirs['camera_data'] / 'camera_metadata.json'
 
         if not poses_path.exists():
             raise FileNotFoundError(f"Camera poses not found: {poses_path}")
@@ -140,8 +141,11 @@ class VaneliaPipeline:
             '--glb', glb_path,
             '--poses', str(poses_path),
             '--intrinsics', str(intrinsics_path),
+            '--metadata', str(metadata_path),
             '--output', str(self.dirs['render_frames']),
             '--scale', str(model_scale),
+            '--position', str(position[0]), str(position[1]), str(position[2]),
+            '--rotation', str(rotation[0]), str(rotation[1]), str(rotation[2]),
             '--resolution', str(resolution[0]), str(resolution[1])
         ]
         
@@ -157,6 +161,9 @@ class VaneliaPipeline:
             normal_str = [f"{float(x):.10f}" for x in plane_normal]
             cmd.extend(['--plane-normal'] + normal_str)
 
+        if auto_ground:
+            cmd.append('--auto-ground')
+
         print(f"Running Blender...\n")
         result = subprocess.run(cmd, check=True)
 
@@ -165,7 +172,9 @@ class VaneliaPipeline:
         return render_frames
 
     def step3_composite_and_refine(self,
-                                  strength: float = 0.25,
+                                  compositor_type: str = "controlnet",
+                                  controlnet_type: str = "depth",
+                                  strength: float = 0.4,
                                   seed: int = 12345,
                                   latent_blend: float = 0.15,
                                   fps: int = 30,
@@ -173,27 +182,34 @@ class VaneliaPipeline:
                                   output_path: str = None,
                                   batch_size: int = 4) -> str:
         """
-        Step 3: Composite and refine using IC-Light.
+        Step 3: Composite and refine using ControlNet or IC-Light.
 
         Args:
-            strength: Denoising strength (0.2-0.3)
+            compositor_type: 'controlnet' (recommended) or 'iclight'
+            controlnet_type: 'depth', 'normal', or 'canny' (ControlNet only)
+            strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Fixed random seed
-            latent_blend: Latent blending ratio
+            latent_blend: Latent blending ratio (IC-Light only)
             fps: Output video FPS
             crf: Video quality (18=high)
             output_path: Final video output path
+            batch_size: Batch size for IC-Light processing
 
         Returns:
             Path to final video
         """
         print(f"\n{'─'*70}")
-        print("STEP 3: Compositing & Refinement (IC-Light)")
+        print(f"STEP 3: Compositing & Refinement ({compositor_type.upper()})")
         print(f"{'─'*70}\n")
 
-        from vanelia.modules.iclight_compositor import ICLightCompositor
+        if compositor_type == "controlnet":
+            from vanelia.modules.controlnet_compositor import ControlNetCompositor
 
-        # Initialize compositor
-        compositor = ICLightCompositor(device='cuda')
+            # Initialize ControlNet compositor
+            compositor = ControlNetCompositor(
+                controlnet_type=controlnet_type,
+                device='cuda'
+            )
 
         # Process frames with batch processing
         output_frames = compositor.process_video_sequence(
@@ -228,7 +244,9 @@ class VaneliaPipeline:
                          max_frames: int = None,
                          model_scale: float = None,
                          resolution: tuple = (1920, 1080),
-                         strength: float = 0.25,
+                         compositor_type: str = "controlnet",
+                         controlnet_type: str = "depth",
+                         strength: float = 0.4,
                          seed: int = 12345,
                          latent_blend: float = 0.15,
                          fps: int = 30,
@@ -248,10 +266,15 @@ class VaneliaPipeline:
             frame_interval: Frame sampling
             max_frames: Max frames to process
             model_scale: 3D model scale
+            position: Object position (x, y, z)
+            rotation: Object rotation in degrees (x, y, z)
+            auto_ground: Auto-place on detected ground
             resolution: Output resolution
-            strength: IC-Light denoising strength
+            compositor_type: Compositor to use ('controlnet' or 'iclight')
+            controlnet_type: ControlNet type ('depth', 'normal', 'canny')
+            strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Random seed (fixed for consistency)
-            latent_blend: Temporal latent blending
+            latent_blend: Temporal latent blending (IC-Light only)
             fps: Output FPS
             crf: Video quality
             skip_step1: Skip camera extraction if already done
@@ -353,6 +376,8 @@ class VaneliaPipeline:
         # Step 3: Compositing & Refinement (always run, can be retried)
         # Use larger batch size for A100 (8 frames at once for faster inference)
         final_video = self.step3_composite_and_refine(
+            compositor_type=compositor_type,
+            controlnet_type=controlnet_type,
             strength=strength,
             seed=seed,
             latent_blend=latent_blend,
@@ -381,8 +406,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
+  # Basic usage (ControlNet-Depth, recommended)
   python vanelia_pipeline.py --input video.mp4 --model product.glb --output final.mp4
+
+  # Use IC-Light compositor instead
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --compositor-type iclight --strength 0.25 --output final.mp4
+
+  # Use ControlNet-Normal for better surface detail
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --controlnet-type normal --strength 0.4 --output final.mp4
 
   # Process every 2nd frame, max 100 frames
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
@@ -390,7 +423,7 @@ Examples:
 
   # High quality settings
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --strength 0.2 --crf 15 --fps 60 --output final.mp4
+      --strength 0.35 --crf 15 --fps 60 --output final.mp4
         """
     )
 
@@ -427,13 +460,19 @@ Examples:
     parser.add_argument('--object-scale', type=float, default=None,
                        help='Manual object scale (overrides auto-placement)')
 
-    # IC-Light settings
-    parser.add_argument('--strength', type=float, default=0.25,
-                       help='IC-Light denoising strength (default: 0.25, range: 0.2-0.3)')
+    # Compositing settings
+    parser.add_argument('--compositor-type', type=str, default='controlnet',
+                       choices=['controlnet', 'iclight'],
+                       help='Compositor to use (default: controlnet, recommended)')
+    parser.add_argument('--controlnet-type', type=str, default='depth',
+                       choices=['depth', 'normal', 'canny'],
+                       help='ControlNet type (default: depth, only used with --compositor-type controlnet)')
+    parser.add_argument('--strength', type=float, default=0.4,
+                       help='Denoising strength (default: 0.4 for ControlNet, use 0.25 for IC-Light)')
     parser.add_argument('--seed', type=int, default=12345,
                        help='Random seed for consistency (default: 12345)')
     parser.add_argument('--latent-blend', type=float, default=0.15,
-                       help='Latent blending ratio (default: 0.15, range: 0.0-0.2)')
+                       help='Latent blending ratio for IC-Light (default: 0.15, range: 0.0-0.2)')
 
     # Video encoding
     parser.add_argument('--fps', type=int, default=30,
@@ -452,6 +491,15 @@ Examples:
         print(f"ERROR: 3D model not found: {args.model}")
         sys.exit(1)
 
+    # Parameter validation warnings
+    if args.compositor_type == 'controlnet' and args.strength < 0.3:
+        print(f"⚠ WARNING: Strength {args.strength} is low for ControlNet (recommended: 0.3-0.5)")
+        print(f"  Consider using --strength 0.4 for better results")
+
+    if args.compositor_type == 'iclight' and args.strength > 0.35:
+        print(f"⚠ WARNING: Strength {args.strength} is high for IC-Light (recommended: 0.2-0.3)")
+        print(f"  High strength may cause flickering. Consider using --strength 0.25")
+
     # Initialize pipeline
     pipeline = VaneliaPipeline(workspace=args.workspace)
 
@@ -465,6 +513,8 @@ Examples:
             max_frames=args.max_frames,
             model_scale=args.model_scale,
             resolution=tuple(args.resolution),
+            compositor_type=args.compositor_type,
+            controlnet_type=args.controlnet_type,
             strength=args.strength,
             seed=args.seed,
             latent_blend=args.latent_blend,

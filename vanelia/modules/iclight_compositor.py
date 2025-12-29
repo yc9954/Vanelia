@@ -7,6 +7,7 @@ Uses ControlNet Inpaint instead of IC-Light for better stability and compatibili
 """
 
 import os
+import sys
 import cv2
 import numpy as np
 import torch

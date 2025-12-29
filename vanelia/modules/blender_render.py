@@ -56,6 +56,16 @@ class BlenderRenderer:
 
         scene = bpy.context.scene
         scene.render.engine = 'CYCLES'
+
+        # GPU Optimization
+        prefs = bpy.context.preferences.addons['cycles'].preferences
+        prefs.compute_device_type = 'CUDA'  # Try CUDA first
+
+        # Enable all available GPUs
+        for device in prefs.devices:
+            if device.type in {'CUDA', 'OPTIX', 'HIP'}:
+                device.use = True
+
         scene.cycles.device = 'GPU'
         scene.cycles.samples = 64  # Increased samples for better quality
         scene.render.resolution_x = resolution_x
@@ -78,7 +88,11 @@ class BlenderRenderer:
         scene.cycles.glossy_bounces = 4
         scene.cycles.transparent_max_bounces = 8
 
-        print("[Blender] ✓ Transparent RGBA rendering enabled")
+        # Tile size for GPU rendering
+        scene.render.tile_x = 256
+        scene.render.tile_y = 256
+
+        print(f"[Blender] ✓ Transparent RGBA rendering enabled ({resolution_x}x{resolution_y})")
 
     def load_glb_model(self, glb_path: str, scale: float = 1.0,
                       location: tuple = (0, 0, 0),
@@ -93,12 +107,17 @@ class BlenderRenderer:
             plane_normal: Normal vector of plane to align with (aligns object Z-axis)
 
         Returns:
-            Loaded object
+            Loaded object (parent of hierarchy if multiple)
         """
         print(f"[Blender] Loading GLB: {glb_path}")
 
-        # Import GLB
-        bpy.ops.import_scene.gltf(filepath=glb_path)
+        # Import GLB with PBR material preservation
+        bpy.ops.import_scene.gltf(
+            filepath=glb_path,
+            import_shading='NORMALS',  # ✅ Preserve PBR nodes
+            merge_vertices=False,
+            bone_heuristic='TEMPERANCE'
+        )
 
         # Get imported object (latest object)
         imported_obj = bpy.context.selected_objects[0]
@@ -149,8 +168,50 @@ class BlenderRenderer:
             
             print(f"[Blender] ✓ Aligned object Z-axis with plane normal: {target_normal}")
 
-        print(f"[Blender] ✓ Loaded: {imported_obj.name}")
-        return imported_obj
+        if not imported_objects:
+            raise RuntimeError(f"Failed to import {glb_path}")
+
+        # Find the root object (parent or first mesh)
+        root_obj = None
+        for obj in imported_objects:
+            if obj.parent is None:
+                root_obj = obj
+                break
+
+        if root_obj is None:
+            root_obj = imported_objects[0]
+
+        # Apply transformations
+        root_obj.scale = (scale, scale, scale)
+        root_obj.location = location
+        root_obj.rotation_euler = rotation
+
+        # Validate and fix materials
+        mat_fixed_count = 0
+        for obj in imported_objects:
+            if obj.type == 'MESH' and obj.data.materials:
+                for slot in obj.material_slots:
+                    mat = slot.material
+                    if mat and mat.use_nodes:
+                        nodes = mat.node_tree.nodes
+                        bsdf = nodes.get('Principled BSDF')
+
+                        if bsdf:
+                            # Fix black materials (Base Color too dark)
+                            base_color = bsdf.inputs['Base Color'].default_value
+                            if base_color[0] < 0.05 and base_color[1] < 0.05 and base_color[2] < 0.05:
+                                bsdf.inputs['Base Color'].default_value = (0.8, 0.8, 0.8, 1.0)
+                                mat_fixed_count += 1
+
+                        # Ensure proper rendering
+                        mat.blend_method = 'OPAQUE'
+                        mat.shadow_method = 'OPAQUE'
+
+        if mat_fixed_count > 0:
+            print(f"[Blender] ⚠ Fixed {mat_fixed_count} black materials")
+
+        print(f"[Blender] ✓ Loaded: {root_obj.name} ({len(imported_objects)} objects)")
+        return root_obj
 
     def create_shadow_catcher(self, size: float = 10.0) -> bpy.types.Object:
         """
@@ -260,8 +321,7 @@ class BlenderRenderer:
             frame_num = start_frame + idx
 
             # Convert numpy array to Blender Matrix
-            # Dust3R outputs camera-to-world, Blender uses world-to-camera
-            # So we need to invert the matrix
+            # NOTE: Matrix is already world-to-camera (inverted in dust3r_camera_extraction.py)
             cam_matrix = Matrix(pose_matrix.tolist())
 
             # Blender camera looks down -Z axis, apply correction if needed
@@ -430,6 +490,39 @@ def main():
     # Default location if not provided
     location = tuple(args.location) if args.location else (0.0, 0.0, 0.0)
     plane_normal = np.array(args.plane_normal) if args.plane_normal else None
+
+    # Load metadata for ground plane info and background frames
+    ground_plane = None
+    bg_image = None
+    if args.metadata:
+        import json
+        with open(args.metadata, 'r') as f:
+            metadata = json.load(f)
+            ground_plane = metadata.get('ground_plane')
+            if ground_plane:
+                print(f"[Load] Ground plane: {ground_plane['A']:.3f}x + {ground_plane['B']:.3f}y + "
+                      f"{ground_plane['C']:.3f}z + {ground_plane['D']:.3f} = 0")
+
+            # Get first background frame for lighting estimation
+            frame_paths = metadata.get('frame_paths', [])
+            if frame_paths:
+                bg_image = frame_paths[0]
+
+    # Determine object placement
+    obj_position = tuple(args.position)
+    obj_rotation = tuple(np.radians(args.rotation))  # Convert degrees to radians
+
+    if args.auto_ground and ground_plane:
+        # Place object on ground plane at (x, y) = (0, 0)
+        # Solve for z: z = -(A*x + B*y + D) / C
+        A, B, C, D = ground_plane['A'], ground_plane['B'], ground_plane['C'], ground_plane['D']
+        x, y = obj_position[0], obj_position[1]
+        if abs(C) > 1e-6:
+            z_ground = -(A * x + B * y + D) / C
+            obj_position = (x, y, z_ground)
+            print(f"[Auto-Ground] Placing object at ({x:.2f}, {y:.2f}, {z_ground:.2f})")
+        else:
+            print("[Auto-Ground] WARNING: Ground plane is vertical, using manual position")
 
     # Initialize renderer
     renderer = BlenderRenderer()

@@ -13,6 +13,7 @@ diffusers>=0.25.0,<0.30.0  # Version 0.30+ requires torch.xpu which may not be a
 transformers>=4.35.0
 accelerate>=0.25.0
 safetensors>=0.4.0
+controlnet-aux>=0.0.7  # ControlNet preprocessors (optional)
 
 # Dust3R (install separately from GitHub)
 # git+https://github.com/naver/dust3r.git
@@ -22,9 +23,9 @@ xformers>=0.0.22  # For memory-efficient attention
 # triton>=2.1.0  # For faster inference
 
 # Utilities
-tqdm>=4.66.0
+tqdm>=4.66.0  # Progress bars
 einops>=0.7.0
-scipy>=1.11.0
+scipy>=1.11.0  # For lighting estimation (gaussian_filter)
 matplotlib>=3.8.0
 psutil>=5.9.0  # For system memory monitoring and management
 
