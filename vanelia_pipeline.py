@@ -26,9 +26,18 @@ import time
 import numpy as np
 
 # Add Dust3R to Python path if it exists
-DUST3R_PATH = "/tmp/dust3r"
-if os.path.exists(DUST3R_PATH) and DUST3R_PATH not in sys.path:
-    sys.path.insert(0, DUST3R_PATH)
+# Try multiple common locations (RunPod, local dev, etc.)
+DUST3R_PATHS = [
+    "/workspace/dust3r",      # RunPod default
+    "/tmp/dust3r",            # Temporary install
+    os.path.expanduser("~/dust3r"),  # User home
+    "./dust3r"                # Local directory
+]
+
+for dust3r_path in DUST3R_PATHS:
+    if os.path.exists(dust3r_path) and dust3r_path not in sys.path:
+        sys.path.insert(0, dust3r_path)
+        break
 
 
 class VaneliaPipeline:
