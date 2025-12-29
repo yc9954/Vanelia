@@ -20,9 +20,21 @@ import cv2
 from tqdm import tqdm
 
 # Add INR-Harmonization to path
-INR_HARMON_PATH = Path(__file__).parent.parent.parent.parent / "INR-Harmonization"
-if INR_HARMON_PATH.exists():
-    sys.path.insert(0, str(INR_HARMON_PATH))
+# Try environment variable first, then common locations
+INR_HARMON_PATH = os.getenv('INR_HARMONIZATION_PATH')
+if INR_HARMON_PATH and os.path.exists(INR_HARMON_PATH):
+    sys.path.insert(0, INR_HARMON_PATH)
+else:
+    # Try common installation locations
+    possible_paths = [
+        Path(__file__).parent.parent.parent.parent / "INR-Harmonization",  # Sibling to Vanelia
+        Path("/home/user/INR-Harmonization"),  # User home
+        Path("/workspace/INR-Harmonization"),  # RunPod workspace
+    ]
+    for path in possible_paths:
+        if path.exists():
+            sys.path.insert(0, str(path))
+            break
 
 
 class INRHarmonizationCompositor:
@@ -95,11 +107,28 @@ class INRHarmonizationCompositor:
     def _download_checkpoint(self):
         """Download checkpoint if not exists."""
         try:
-            from scripts.download_inr_checkpoint import download_checkpoint
-            download_checkpoint()
+            import subprocess
+            import sys
+
+            # Find download script relative to this file
+            script_path = Path(__file__).parent.parent.parent / "scripts" / "download_inr_checkpoint.py"
+
+            if not script_path.exists():
+                raise FileNotFoundError(f"Download script not found: {script_path}")
+
+            print(f"[INR-Harmonization] Running checkpoint download script...")
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            print(result.stdout)
+
         except Exception as e:
             print(f"[WARNING] Could not auto-download: {e}")
             print(f"[INFO] Please manually run: python scripts/download_inr_checkpoint.py")
+            print(f"[INFO] Or download from: https://drive.google.com/file/d/1Tv9aahaPmJ_RGeYdawLCNWNGabZgJo6y/view")
 
     def _build_model(self):
         """Build the INR-Harmonization model."""
@@ -320,6 +349,71 @@ class INRHarmonizationCompositor:
 
         print(f"[INR-Harmonization] Saved {len(output_paths)} frames to {output_dir}")
         return output_paths
+
+    def encode_video_ffmpeg(self, frame_dir: str, output_path: str,
+                           fps: int = 30, crf: int = 18) -> str:
+        """
+        Encode frames to MP4 video using FFmpeg.
+
+        Args:
+            frame_dir (str): Directory containing output frames
+            output_path (str): Path for output video file
+            fps (int): Frames per second (default: 30)
+            crf (int): Constant Rate Factor for quality (18=high, 23=default, 28=low)
+
+        Returns:
+            str: Path to encoded video file
+        """
+        import subprocess
+
+        frame_dir = Path(frame_dir)
+        frames = sorted(frame_dir.glob("*.png"))
+
+        if not frames:
+            raise FileNotFoundError(f"No PNG frames found in {frame_dir}")
+
+        # Determine frame pattern from first frame
+        first_frame = frames[0].name
+        # Extract numbering pattern (e.g., frame_000001.png)
+        import re
+        match = re.search(r'(\d+)', first_frame)
+        if match:
+            num_digits = len(match.group(1))
+            base_name = first_frame[:match.start()]
+            extension = first_frame[match.end():]
+            pattern = f"{base_name}%0{num_digits}d{extension}"
+        else:
+            # Fallback to generic pattern
+            pattern = "frame_%06d.png"
+
+        frame_pattern = str(frame_dir / pattern)
+
+        # Build FFmpeg command
+        cmd = [
+            'ffmpeg', '-y',
+            '-framerate', str(fps),
+            '-i', frame_pattern,
+            '-c:v', 'libx264',
+            '-crf', str(crf),
+            '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',  # Enable web streaming
+            output_path
+        ]
+
+        print(f"\n[FFmpeg] Encoding video...")
+        print(f"  Input pattern: {frame_pattern}")
+        print(f"  Output: {output_path}")
+        print(f"  FPS: {fps}, CRF: {crf}")
+        print(f"  Total frames: {len(frames)}")
+
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"[FFmpeg] ✓ Video encoded successfully: {output_path}")
+            return output_path
+        except subprocess.CalledProcessError as e:
+            print(f"[FFmpeg] ✗ Encoding failed!")
+            print(f"  stderr: {e.stderr}")
+            raise RuntimeError(f"FFmpeg encoding failed: {e.stderr}") from e
 
 
 if __name__ == "__main__":

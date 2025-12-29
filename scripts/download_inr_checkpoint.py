@@ -13,11 +13,14 @@ import sys
 def download_checkpoint():
     """Download Video_HYouTube_256.pth checkpoint from Google Drive."""
 
-    # Create checkpoints directory
-    checkpoint_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints", "inr_harmonization")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Create checkpoints directory using absolute path resolution
+    from pathlib import Path
+    script_dir = Path(__file__).parent.resolve()
+    project_root = script_dir.parent
+    checkpoint_dir = project_root / "checkpoints" / "inr_harmonization"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_path = os.path.join(checkpoint_dir, "Video_HYouTube_256.pth")
+    checkpoint_path = checkpoint_dir / "Video_HYouTube_256.pth"
 
     # Check if already downloaded
     if os.path.exists(checkpoint_path):

@@ -17,20 +17,26 @@ import json
 from typing import Dict, List, Tuple
 import sys
 
-# Add MUSt3R to path - try common installation paths
-must3r_paths = [
-    "/workspace/must3r",
-    "/home/user/must3r",
-    os.path.join(os.path.dirname(__file__), "../../../must3r"),
-    os.path.join(os.path.dirname(__file__), "../../must3r"),
-]
+# Add MUSt3R to path - try environment variable first, then common locations
+must3r_path_env = os.getenv('MUST3R_PATH')
+if must3r_path_env and os.path.exists(must3r_path_env):
+    sys.path.insert(0, must3r_path_env)
+    print(f"[MUSt3R] Added to path (from env): {must3r_path_env}")
+else:
+    # Try common installation paths (cross-platform compatible)
+    must3r_paths = [
+        Path("/workspace/must3r"),  # RunPod default
+        Path("/home/user/must3r"),  # Linux user home
+        Path.home() / "must3r",  # Current user home (cross-platform)
+        Path(__file__).parent.parent.parent.parent / "must3r",  # Sibling to Vanelia
+        Path(__file__).parent.parent.parent / "must3r",  # Parent of vanelia/
+    ]
 
-for must3r_path in must3r_paths:
-    if os.path.exists(must3r_path) and os.path.isdir(must3r_path):
-        if must3r_path not in sys.path:
-            sys.path.insert(0, must3r_path)
+    for must3r_path in must3r_paths:
+        if must3r_path.exists() and must3r_path.is_dir():
+            sys.path.insert(0, str(must3r_path))
             print(f"[MUSt3R] Added to path: {must3r_path}")
-        break
+            break
 
 # Import MUSt3R
 try:
@@ -77,20 +83,41 @@ class MUSt3RCameraExtractor:
             try:
                 self.model = AsymmetricMASt3R.from_pretrained(model_name).to(device)
                 print(f"[MUSt3R] ✓ Model loaded: {model_name}")
-            except:
+            except Exception as e1:
                 # Fallback to simpler loading
+                print(f"[MUSt3R] Primary loading failed: {e1}")
                 print(f"[MUSt3R] Trying alternative loading method...")
-                from huggingface_hub import hf_hub_download
 
-                # Download checkpoint
-                checkpoint = hf_hub_download(
-                    repo_id="naver/MUSt3R_ViTLarge_BaseDecoder_512_dpt",
-                    filename="checkpoint-best.pth"
-                )
+                try:
+                    from huggingface_hub import hf_hub_download
 
-                # Load with torch
-                self.model = torch.load(checkpoint, map_location=device)
-                print(f"[MUSt3R] ✓ Model loaded from checkpoint")
+                    # Download checkpoint
+                    checkpoint_file = hf_hub_download(
+                        repo_id="naver/MUSt3R_ViTLarge_BaseDecoder_512_dpt",
+                        filename="checkpoint-best.pth"
+                    )
+
+                    # Create model instance first
+                    print(f"[MUSt3R] Creating model instance...")
+                    self.model = AsymmetricMASt3R.from_pretrained(
+                        "naver/MUSt3R_ViTLarge_BaseDecoder_512_dpt"
+                    ).to(device)
+
+                    # Then load checkpoint weights
+                    print(f"[MUSt3R] Loading checkpoint weights...")
+                    state_dict = torch.load(checkpoint_file, map_location=device)
+                    if 'model' in state_dict:
+                        state_dict = state_dict['model']
+                    self.model.load_state_dict(state_dict, strict=False)
+                    print(f"[MUSt3R] ✓ Model loaded from checkpoint")
+
+                except Exception as e2:
+                    raise RuntimeError(
+                        f"Failed to load MUSt3R model. Tried:\n"
+                        f"1. from_pretrained: {e1}\n"
+                        f"2. Manual checkpoint: {e2}\n"
+                        f"Please check MUSt3R installation."
+                    ) from e2
 
             # Split into encoder and decoder for must3r_inference_video
             if hasattr(self.model, 'encoder') and hasattr(self.model, 'decoder'):
@@ -102,6 +129,10 @@ class MUSt3RCameraExtractor:
                     self.encoder, self.decoder = self.model
                 else:
                     self.encoder = self.decoder = self.model
+
+            # Validate encoder and decoder exist
+            if self.encoder is None or self.decoder is None:
+                raise ValueError("Failed to extract encoder/decoder from MUSt3R model")
 
         except Exception as e:
             print(f"[MUSt3R] ✗ Failed to load model: {e}")
@@ -287,8 +318,21 @@ class MUSt3RCameraExtractor:
 
         print(f"[MUSt3R] ✓ Video inference complete")
 
+        # Validate scene output
+        if not hasattr(scene, 'cams2world'):
+            raise RuntimeError("MUSt3R inference failed: missing 'cams2world' attribute")
+        if not hasattr(scene, 'focals'):
+            raise RuntimeError("MUSt3R inference failed: missing 'focals' attribute")
+        if not hasattr(scene, 'true_shape'):
+            raise RuntimeError("MUSt3R inference failed: missing 'true_shape' attribute")
+        if not hasattr(scene, 'x_out'):
+            raise RuntimeError("MUSt3R inference failed: missing 'x_out' attribute")
+
         # Extract camera poses (c2w format)
-        cameras = torch.stack(scene.cams2world).cpu().numpy()  # (N, 4, 4)
+        try:
+            cameras = torch.stack(scene.cams2world).cpu().numpy()  # (N, 4, 4)
+        except Exception as e:
+            raise RuntimeError(f"Failed to extract camera poses: {e}") from e
 
         # Extract intrinsics (focal lengths)
         focals = np.array(scene.focals)  # (N,)
