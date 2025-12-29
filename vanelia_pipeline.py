@@ -4,9 +4,9 @@ Vanelia - Video Object Insertion Pipeline
 Complete end-to-end pipeline for inserting 3D models into videos.
 
 Pipeline:
-1. Dust3R: Extract camera poses from video
+1. MUSt3R: Extract camera poses from video (with temporal consistency)
 2. Blender: Render 3D model with camera animation
-3. IC-Light: Composite and refine with temporal consistency
+3. INR-Harmonization: Photorealistic video harmonization (pre-trained)
 4. FFmpeg: Encode final video
 
 Usage:
@@ -74,25 +74,31 @@ class VaneliaPipeline:
 
     def step1_extract_camera_poses(self, video_path: str,
                                   frame_interval: int = 1,
-                                  max_frames: int = None) -> dict:
+                                  max_frames: int = None,
+                                  use_must3r: bool = True) -> dict:
         """
-        Step 1: Extract camera poses using Dust3R.
+        Step 1: Extract camera poses using MUSt3R (default) or Dust3R.
 
         Args:
             video_path: Input video path
             frame_interval: Frame sampling interval
             max_frames: Maximum frames to process
+            use_must3r: Use MUSt3R for better temporal consistency (default: True)
 
         Returns:
             Camera data dictionary
         """
+        method = "MUSt3R" if use_must3r else "Dust3R"
         print(f"\n{'─'*70}")
-        print("STEP 1: Camera Pose Extraction (Dust3R)")
+        print(f"STEP 1: Camera Pose Extraction ({method})")
         print(f"{'─'*70}\n")
 
-        from vanelia.modules.dust3r_camera_extraction import Dust3RCameraExtractor
-
-        extractor = Dust3RCameraExtractor(device='cuda')
+        if use_must3r:
+            from vanelia.modules.must3r_camera_extraction import MUSt3RCameraExtractor
+            extractor = MUSt3RCameraExtractor(device='cuda')
+        else:
+            from vanelia.modules.dust3r_camera_extraction import Dust3RCameraExtractor
+            extractor = Dust3RCameraExtractor(device='cuda')
 
         result = extractor.process_video(
             video_path=video_path,
@@ -186,7 +192,7 @@ class VaneliaPipeline:
         return render_frames
 
     def step3_composite_and_refine(self,
-                                  compositor_type: str = "controlnet",
+                                  compositor_type: str = "inr",
                                   controlnet_type: str = "depth",
                                   strength: float = 0.4,
                                   seed: int = 12345,
@@ -196,10 +202,10 @@ class VaneliaPipeline:
                                   output_path: str = None,
                                   batch_size: int = 4) -> str:
         """
-        Step 3: Composite and refine using ControlNet or IC-Light.
+        Step 3: Composite and refine using INR-Harmonization, ControlNet, or IC-Light.
 
         Args:
-            compositor_type: 'controlnet' (recommended) or 'iclight'
+            compositor_type: 'inr' (recommended, pre-trained), 'controlnet', or 'iclight'
             controlnet_type: 'depth', 'normal', or 'canny' (ControlNet only)
             strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Fixed random seed
@@ -216,7 +222,27 @@ class VaneliaPipeline:
         print(f"STEP 3: Compositing & Refinement ({compositor_type.upper()})")
         print(f"{'─'*70}\n")
 
-        if compositor_type == "photorealistic":
+        if compositor_type == "inr":
+            from vanelia.modules.inr_harmonization_compositor import INRHarmonizationCompositor
+
+            # Initialize INR-Harmonization compositor (pre-trained on HYouTube dataset)
+            compositor = INRHarmonizationCompositor(
+                device='cuda',
+                base_size=256,
+                input_size=256,
+                auto_download=True
+            )
+
+            # Process frames - INR harmonization with implicit neural representation
+            output_frames = compositor.process_video_sequence(
+                render_dir=str(self.dirs['render_frames']),
+                background_dir=str(self.dirs['background_frames']),
+                output_dir=str(self.dirs['refined_frames']),
+                strength=strength,
+                seed=seed
+            )
+
+        elif compositor_type == "photorealistic":
             from vanelia.modules.photorealistic_compositor import PhotorealisticCompositor
 
             # Initialize Photorealistic compositor (Anything in Any Scene approach)
@@ -270,7 +296,7 @@ class VaneliaPipeline:
             )
 
         else:
-            raise ValueError(f"Unknown compositor type: {compositor_type}. Choose 'photorealistic', 'controlnet', or 'iclight'")
+            raise ValueError(f"Unknown compositor type: {compositor_type}. Choose 'inr' (recommended), 'photorealistic', 'controlnet', or 'iclight'")
 
         # Encode video
         if output_path is None:
@@ -320,7 +346,7 @@ class VaneliaPipeline:
             rotation: Object rotation in degrees (x, y, z)
             auto_ground: Auto-place on detected ground
             resolution: Output resolution
-            compositor_type: Compositor to use ('controlnet' or 'iclight')
+            compositor_type: Compositor to use ('inr' recommended, 'controlnet', or 'iclight')
             controlnet_type: ControlNet type ('depth', 'normal', 'canny')
             strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Random seed (fixed for consistency)
@@ -456,10 +482,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage (ControlNet - WORKING, RECOMMENDED)
+  # Basic usage (INR-Harmonization - RECOMMENDED, pre-trained)
   python vanelia_pipeline.py --input video.mp4 --model product.glb --output final.mp4
 
-  # Use ControlNet with different preprocessor
+  # Use ControlNet compositor (depth-based diffusion)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
       --compositor-type controlnet --controlnet-type depth --output final.mp4
 
@@ -467,7 +493,7 @@ Examples:
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
       --compositor-type iclight --strength 0.25 --output final.mp4
 
-  # Photorealistic compositor (EXPERIMENTAL - needs pre-trained weights!)
+  # Photorealistic compositor (EXPERIMENTAL - architecture only, no weights!)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
       --compositor-type photorealistic --output final.mp4
 
@@ -515,9 +541,9 @@ Examples:
                        help='Manual object scale (overrides auto-placement)')
 
     # Compositing settings
-    parser.add_argument('--compositor-type', type=str, default='controlnet',
-                       choices=['photorealistic', 'controlnet', 'iclight'],
-                       help='Compositor: controlnet (default, WORKING), photorealistic (NEEDS PRE-TRAINED WEIGHTS), iclight')
+    parser.add_argument('--compositor-type', type=str, default='inr',
+                       choices=['inr', 'photorealistic', 'controlnet', 'iclight'],
+                       help='Compositor: inr (default, pre-trained video harmonization), controlnet, photorealistic (experimental), iclight')
     parser.add_argument('--controlnet-type', type=str, default='depth',
                        choices=['depth', 'normal', 'canny'],
                        help='ControlNet type (default: depth, only used with --compositor-type controlnet)')
