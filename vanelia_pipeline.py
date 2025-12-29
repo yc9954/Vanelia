@@ -456,28 +456,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage (Photorealistic compositor - RECOMMENDED!)
+  # Basic usage (ControlNet - WORKING, RECOMMENDED)
   python vanelia_pipeline.py --input video.mp4 --model product.glb --output final.mp4
 
-  # Use photorealistic compositor explicitly (same as above)
-  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --compositor-type photorealistic --output final.mp4
-
-  # Use ControlNet compositor instead (legacy)
+  # Use ControlNet with different preprocessor
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
       --compositor-type controlnet --controlnet-type depth --output final.mp4
 
-  # Use IC-Light compositor instead (legacy)
+  # Use IC-Light compositor (slower but better lighting)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
       --compositor-type iclight --strength 0.25 --output final.mp4
 
-  # Process every 2nd frame, max 30 frames (memory-safe)
+  # Photorealistic compositor (EXPERIMENTAL - needs pre-trained weights!)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --frame-interval 2 --max-frames 30 --output final.mp4
+      --compositor-type photorealistic --output final.mp4
 
-  # High quality settings with photorealistic compositor
+  # Process max 30 frames (memory-safe for A100)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --compositor-type photorealistic --crf 15 --fps 60 --output final.mp4
+      --max-frames 30 --output final.mp4
+
+  # High quality settings
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --strength 0.35 --crf 15 --fps 60 --output final.mp4
         """
     )
 
@@ -515,9 +515,9 @@ Examples:
                        help='Manual object scale (overrides auto-placement)')
 
     # Compositing settings
-    parser.add_argument('--compositor-type', type=str, default='photorealistic',
+    parser.add_argument('--compositor-type', type=str, default='controlnet',
                        choices=['photorealistic', 'controlnet', 'iclight'],
-                       help='Compositor to use: photorealistic (Anything in Any Scene - NEW!), controlnet, iclight (default: photorealistic)')
+                       help='Compositor: controlnet (default, WORKING), photorealistic (NEEDS PRE-TRAINED WEIGHTS), iclight')
     parser.add_argument('--controlnet-type', type=str, default='depth',
                        choices=['depth', 'normal', 'canny'],
                        help='ControlNet type (default: depth, only used with --compositor-type controlnet)')
