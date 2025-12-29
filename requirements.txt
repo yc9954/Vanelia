@@ -4,19 +4,22 @@
 # Core Dependencies
 torch>=2.0.0
 torchvision>=0.15.0
-numpy>=1.24.0,<2.0.0  # NumPy 2.x is incompatible with PyTorch compiled with NumPy 1.x
-opencv-python>=4.8.0,<4.10.0  # Compatible with NumPy 1.x
+numpy>=1.24.0,<2.1.0  # NumPy 2.x supported from PyTorch 2.2+, limit to <2.1 for stability
+gdown>=4.7.0  # For downloading checkpoints from Google Drive
+opencv-python>=4.8.0  # OpenCV with NumPy 2.x support from version 4.10+
 pillow>=10.0.0
 
 # Diffusion Models
-diffusers>=0.25.0,<0.30.0  # Version 0.30+ requires torch.xpu which may not be available
-transformers>=4.35.0,<4.40.0  # Version 4.40+ has torch._pytree compatibility issues
+diffusers>=0.25.0  # Removed upper bound - stable API as of 0.25+
+transformers>=4.35.0,<4.50.0  # Updated upper bound for compatibility
 accelerate>=0.25.0
 safetensors>=0.4.0
 controlnet-aux>=0.0.7  # ControlNet preprocessors (optional)
 
-# Dust3R (install separately from GitHub)
-# git+https://github.com/naver/dust3r.git
+# 3D Reconstruction Models (install separately from GitHub)
+# Dust3R: git clone https://github.com/naver/dust3r.git && cd dust3r && pip install -e .
+# MUSt3R: git clone --recursive https://github.com/naver/must3r.git && cd must3r && pip install -e .
+# INR-Harmonization: git clone https://github.com/WindVChen/INR-Harmonization.git && cd INR-Harmonization && pip install -r requirements.txt
 
 # Optional: Performance optimizations
 xformers>=0.0.22  # For memory-efficient attention
