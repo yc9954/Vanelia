@@ -8,9 +8,26 @@ echo "=================================================="
 echo "  Vanelia RunPod Setup"
 echo "=================================================="
 
+# 0. Install system dependencies
+echo ""
+echo "[0/6] Installing system dependencies..."
+apt-get update -qq
+apt-get install -y -qq \
+    ffmpeg \
+    libx11-6 libxext6 libxfixes3 libxi6 libxrender1 \
+    libxss1 libxtst6 libxrandr2 libasound2 libfontconfig1 \
+    libxkbcommon0 libxkbcommon-x11-0 libxcb1 \
+    libxcb-xinerama0 libxcb-cursor0 libxcb-icccm4 \
+    libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+    libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 \
+    libxcb-xinput0 libsm6 libice6 libglu1-mesa \
+    > /dev/null 2>&1
+
+echo "✓ System dependencies installed (ffmpeg + Blender libraries)"
+
 # 1. Install Blender 4.0.2
 echo ""
-echo "[1/5] Installing Blender 4.0.2..."
+echo "[1/6] Installing Blender 4.0.2..."
 BLENDER_VERSION="4.0.2"
 BLENDER_URL="https://download.blender.org/release/Blender4.0/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
 BLENDER_DIR="/workspace/blender"
@@ -33,7 +50,7 @@ fi
 
 # 2. Install Python dependencies
 echo ""
-echo "[2/5] Installing Python dependencies..."
+echo "[2/6] Installing Python dependencies..."
 cd /workspace/Vanelia
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -42,15 +59,20 @@ echo "✓ Python dependencies installed"
 
 # 3. Install Dust3R
 echo ""
-echo "[3/5] Installing Dust3R..."
+echo "[3/6] Installing Dust3R..."
 if [ ! -d "/workspace/dust3r" ]; then
     cd /workspace
     git clone https://github.com/naver/dust3r.git
     cd dust3r
 
+    # Initialize git submodules (critical for croco dependency)
+    echo "  Initializing git submodules..."
+    git submodule update --init --recursive
+
     # Install dependencies if requirements.txt exists
     if [ -f "requirements.txt" ]; then
-        pip install -r requirements.txt
+        echo "  Installing Dust3R dependencies..."
+        pip install -r requirements.txt -q
     fi
 
     # Try to install if setup files exist, otherwise just use PYTHONPATH
@@ -67,6 +89,18 @@ if [ ! -d "/workspace/dust3r" ]; then
     echo "✓ Dust3R installed to /workspace/dust3r"
 else
     echo "✓ Dust3R already installed"
+    cd /workspace/dust3r
+
+    # Ensure submodules are initialized
+    echo "  Checking git submodules..."
+    git submodule update --init --recursive 2>/dev/null || true
+
+    # Install/update dependencies if requirements.txt exists
+    if [ -f "requirements.txt" ]; then
+        echo "  Installing/updating Dust3R dependencies..."
+        pip install -r requirements.txt -q
+    fi
+
     # Ensure PYTHONPATH is set
     if ! grep -q "/workspace/dust3r" ~/.bashrc; then
         echo 'export PYTHONPATH="/workspace/dust3r:$PYTHONPATH"' >> ~/.bashrc
@@ -76,14 +110,14 @@ fi
 
 # 4. Set PyTorch memory allocation config
 echo ""
-echo "[4/5] Configuring PyTorch memory management..."
+echo "[4/6] Configuring PyTorch memory management..."
 echo 'export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128' >> ~/.bashrc
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 echo "✓ PyTorch memory config set"
 
 # 5. Verify installation
 echo ""
-echo "[5/5] Verifying installation..."
+echo "[5/6] Verifying installation..."
 
 # Check Blender
 if command -v blender &> /dev/null; then

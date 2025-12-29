@@ -139,6 +139,11 @@ class VaneliaPipeline:
         if not poses_path.exists():
             raise FileNotFoundError(f"Camera poses not found: {poses_path}")
 
+        # Initialize default values for position, rotation, and auto_ground
+        position = model_location if model_location is not None else (0.0, 0.0, 0.0)
+        rotation = (0.0, 0.0, 0.0)
+        auto_ground = False
+
         # Construct Blender command
         blender_script = Path(__file__).parent / 'vanelia' / 'modules' / 'blender_render.py'
 
@@ -157,13 +162,13 @@ class VaneliaPipeline:
             '--rotation', str(rotation[0]), str(rotation[1]), str(rotation[2]),
             '--resolution', str(resolution[0]), str(resolution[1])
         ]
-        
-        # Add location if provided
+
+        # Add location if provided (for backward compatibility)
         # Convert to fixed-point format to avoid scientific notation parsing issues
         if model_location is not None:
             loc_str = [f"{float(x):.10f}" for x in model_location]
             cmd.extend(['--location'] + loc_str)
-        
+
         # Add plane normal if provided (for rotation alignment)
         # Convert to fixed-point format to avoid scientific notation parsing issues
         if plane_normal is not None:
@@ -220,16 +225,34 @@ class VaneliaPipeline:
                 device='cuda'
             )
 
-        # Process frames with batch processing
-        output_frames = compositor.process_video_sequence(
-            render_dir=str(self.dirs['render_frames']),
-            background_dir=str(self.dirs['background_frames']),
-            output_dir=str(self.dirs['refined_frames']),
-            strength=strength,
-            seed=seed,
-            latent_blend_ratio=latent_blend,
-            batch_size=batch_size
-        )
+            # Process frames - ControlNet doesn't support latent_blend_ratio or batch_size
+            output_frames = compositor.process_video_sequence(
+                render_dir=str(self.dirs['render_frames']),
+                background_dir=str(self.dirs['background_frames']),
+                output_dir=str(self.dirs['refined_frames']),
+                strength=strength,
+                seed=seed
+            )
+
+        elif compositor_type == "iclight":
+            from vanelia.modules.iclight_compositor import ICLightCompositor
+
+            # Initialize IC-Light compositor
+            compositor = ICLightCompositor(device='cuda')
+
+            # Process frames - IC-Light supports latent_blend_ratio and batch_size
+            output_frames = compositor.process_video_sequence(
+                render_dir=str(self.dirs['render_frames']),
+                background_dir=str(self.dirs['background_frames']),
+                output_dir=str(self.dirs['refined_frames']),
+                strength=strength,
+                seed=seed,
+                latent_blend_ratio=latent_blend,
+                batch_size=batch_size
+            )
+
+        else:
+            raise ValueError(f"Unknown compositor type: {compositor_type}. Choose 'controlnet' or 'iclight'")
 
         # Encode video
         if output_path is None:
@@ -489,6 +512,12 @@ Examples:
     parser.add_argument('--crf', type=int, default=18,
                        help='Video quality CRF (default: 18, lower=better)')
 
+    # Resume/skip options
+    parser.add_argument('--skip-step1', action='store_true',
+                       help='Skip camera extraction step (use existing camera data)')
+    parser.add_argument('--skip-step2', action='store_true',
+                       help='Skip rendering step (use existing render frames)')
+
     args = parser.parse_args()
 
     # Validate inputs
@@ -529,6 +558,8 @@ Examples:
             latent_blend=args.latent_blend,
             fps=args.fps,
             crf=args.crf,
+            skip_step1=args.skip_step1,
+            skip_step2=args.skip_step2,
             auto_placement=args.auto_placement,
             manual_location=tuple(args.object_location) if args.object_location else None,
             manual_scale=args.object_scale

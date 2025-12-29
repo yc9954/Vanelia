@@ -88,9 +88,14 @@ class BlenderRenderer:
         scene.cycles.glossy_bounces = 4
         scene.cycles.transparent_max_bounces = 8
 
-        # Tile size for GPU rendering
-        scene.render.tile_x = 256
-        scene.render.tile_y = 256
+        # Tile size for GPU rendering (deprecated in Blender 4.0+)
+        try:
+            if hasattr(scene.render, 'tile_x'):
+                scene.render.tile_x = 256
+                scene.render.tile_y = 256
+        except AttributeError:
+            # Blender 4.0+ uses automatic tiling
+            pass
 
         print(f"[Blender] ✓ Transparent RGBA rendering enabled ({resolution_x}x{resolution_y})")
 
@@ -119,8 +124,13 @@ class BlenderRenderer:
             bone_heuristic='TEMPERANCE'
         )
 
+        # Get imported objects
+        imported_objects = bpy.context.selected_objects
+        if not imported_objects:
+            raise RuntimeError(f"Failed to import {glb_path}: No objects were imported")
+
         # Get imported object (latest object)
-        imported_obj = bpy.context.selected_objects[0]
+        imported_obj = imported_objects[0]
         imported_obj.scale = (scale, scale, scale)
         imported_obj.location = location
         
@@ -168,24 +178,6 @@ class BlenderRenderer:
             
             print(f"[Blender] ✓ Aligned object Z-axis with plane normal: {target_normal}")
 
-        if not imported_objects:
-            raise RuntimeError(f"Failed to import {glb_path}")
-
-        # Find the root object (parent or first mesh)
-        root_obj = None
-        for obj in imported_objects:
-            if obj.parent is None:
-                root_obj = obj
-                break
-
-        if root_obj is None:
-            root_obj = imported_objects[0]
-
-        # Apply transformations
-        root_obj.scale = (scale, scale, scale)
-        root_obj.location = location
-        root_obj.rotation_euler = rotation
-
         # Validate and fix materials
         mat_fixed_count = 0
         for obj in imported_objects:
@@ -210,8 +202,8 @@ class BlenderRenderer:
         if mat_fixed_count > 0:
             print(f"[Blender] ⚠ Fixed {mat_fixed_count} black materials")
 
-        print(f"[Blender] ✓ Loaded: {root_obj.name} ({len(imported_objects)} objects)")
-        return root_obj
+        print(f"[Blender] ✓ Loaded: {imported_obj.name} ({len(imported_objects)} objects)")
+        return imported_obj
 
     def create_shadow_catcher(self, size: float = 10.0) -> bpy.types.Object:
         """
@@ -478,6 +470,10 @@ def parse_args():
     parser.add_argument('--scale', type=float, default=1.0, help='Model scale')
     parser.add_argument('--resolution', type=int, nargs=2, default=[1920, 1080], help='Resolution (width height)')
     parser.add_argument('--location', type=float, nargs=3, default=None, help='Object location (x y z)')
+    parser.add_argument('--position', type=float, nargs=3, default=[0.0, 0.0, 0.0], help='Object position (x y z)')
+    parser.add_argument('--rotation', type=float, nargs=3, default=[0.0, 0.0, 0.0], help='Object rotation in degrees (x y z)')
+    parser.add_argument('--auto-ground', action='store_true', help='Auto-place object on ground plane')
+    parser.add_argument('--metadata', type=str, default=None, help='Path to camera metadata JSON')
     parser.add_argument('--plane-normal', type=float, nargs=3, default=None, help='Plane normal for alignment (x y z)')
 
     return parser.parse_args(argv)
@@ -487,8 +483,12 @@ def main():
     """Main rendering function."""
     args = parse_args()
 
-    # Default location if not provided
-    location = tuple(args.location) if args.location else (0.0, 0.0, 0.0)
+    # Handle location vs position for backward compatibility
+    if args.location is not None:
+        obj_position = tuple(args.location)
+    else:
+        obj_position = tuple(args.position)
+
     plane_normal = np.array(args.plane_normal) if args.plane_normal else None
 
     # Load metadata for ground plane info and background frames
@@ -508,8 +508,7 @@ def main():
             if frame_paths:
                 bg_image = frame_paths[0]
 
-    # Determine object placement
-    obj_position = tuple(args.position)
+    # Apply rotation (convert degrees to radians)
     obj_rotation = tuple(np.radians(args.rotation))  # Convert degrees to radians
 
     if args.auto_ground and ground_plane:
@@ -532,7 +531,7 @@ def main():
     obj = renderer.load_glb_model(
         glb_path=args.glb,
         scale=args.scale,
-        location=location,
+        location=obj_position,
         plane_normal=plane_normal
     )
 

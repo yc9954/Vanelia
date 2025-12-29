@@ -13,6 +13,20 @@ import json
 from typing import Dict, List, Tuple
 import sys
 
+# Add Dust3R to path - try common installation paths
+dust3r_paths = [
+    "/workspace/dust3r",
+    os.path.join(os.path.dirname(__file__), "../../../dust3r"),
+    os.path.join(os.path.dirname(__file__), "../../dust3r"),
+]
+
+for dust3r_path in dust3r_paths:
+    if os.path.exists(dust3r_path) and os.path.isdir(dust3r_path):
+        if dust3r_path not in sys.path:
+            sys.path.insert(0, dust3r_path)
+            print(f"[Dust3R] Added to path: {dust3r_path}")
+        break
+
 # Add Dust3R to path (clone from: https://github.com/naver/dust3r)
 # Assuming dust3r is installed in the environment or path
 try:
@@ -23,6 +37,7 @@ try:
     from dust3r.cloud_opt import global_aligner, GlobalAlignerMode
 except ImportError:
     print("ERROR: Dust3R not found. Please install from https://github.com/naver/dust3r")
+    print("Tried paths:", dust3r_paths)
     sys.exit(1)
 
 
@@ -277,6 +292,9 @@ class Dust3RCameraExtractor:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
+        # Initialize point_cloud before processing
+        point_cloud = None
+
         # Extract background frames
         bg_dir = output_path / "background_frames"
         frame_paths = self.extract_frames(video_path, str(bg_dir),
@@ -352,10 +370,18 @@ class Dust3RCameraExtractor:
                 np.save(pts3d_path, pts3d)
                 num_points = len(pts3d) if pts3d.ndim > 0 else 0
                 print(f"[Dust3R] Point cloud saved: {pts3d_path} (shape: {pts3d.shape}, ~{num_points} points)")
+
+                # Assign to point_cloud variable for later use
+                point_cloud = pts3d
             except Exception as e:
                 print(f"[Dust3R] WARNING: Could not save point cloud: {e}")
                 import traceback
                 traceback.print_exc()
+
+        # Detect ground plane only if point cloud is available
+        ground_plane = None
+        if point_cloud is not None:
+            ground_plane = self.detect_ground_plane(point_cloud)
 
         # Save results
         poses_path = output_path / "camera_poses.npy"
@@ -374,7 +400,7 @@ class Dust3RCameraExtractor:
             'frame_interval': frame_interval,
             'camera_poses_shape': cameras_blender.shape,
             'intrinsics_shape': intrinsics.shape,
-            'point_cloud_size': int(len(point_cloud)),
+            'point_cloud_size': int(len(point_cloud)) if point_cloud is not None else 0,
             'coordinate_system': 'Blender (Right, Up, Back)',
             'coordinate_conversion': 'Camera-to-World → World-to-Camera (inverted)',
             'ground_plane': ground_plane,
