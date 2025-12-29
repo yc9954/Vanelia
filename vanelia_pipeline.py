@@ -318,6 +318,7 @@ class VaneliaPipeline:
                          output_path: str,
                          frame_interval: int = 1,
                          max_frames: int = None,
+                         camera_extractor: str = "must3r",
                          model_scale: float = None,
                          resolution: tuple = (1920, 1080),
                          compositor_type: str = "controlnet",
@@ -341,20 +342,21 @@ class VaneliaPipeline:
             output_path: Final output video
             frame_interval: Frame sampling
             max_frames: Max frames to process
+            camera_extractor: Camera extraction method ('must3r' recommended, or 'dust3r')
             model_scale: 3D model scale
-            position: Object position (x, y, z)
-            rotation: Object rotation in degrees (x, y, z)
-            auto_ground: Auto-place on detected ground
             resolution: Output resolution
             compositor_type: Compositor to use ('inr' recommended, 'controlnet', or 'iclight')
             controlnet_type: ControlNet type ('depth', 'normal', 'canny')
-            strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
+            strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light, 0.0-1.0 for INR)
             seed: Random seed (fixed for consistency)
             latent_blend: Temporal latent blending (IC-Light only)
             fps: Output FPS
             crf: Video quality
             skip_step1: Skip camera extraction if already done
             skip_step2: Skip rendering if already done
+            auto_placement: Automatically find optimal object placement
+            manual_location: Manual object location (overrides auto_placement)
+            manual_scale: Manual object scale (overrides auto_placement)
 
         Returns:
             Path to final video
@@ -362,11 +364,14 @@ class VaneliaPipeline:
         start_time = time.time()
 
         # Step 1: Camera Extraction (skip if already done)
+        use_must3r = (camera_extractor.lower() == 'must3r')
+
         if not skip_step1:
             self.step1_extract_camera_poses(
                 video_path=video_path,
                 frame_interval=frame_interval,
-                max_frames=max_frames
+                max_frames=max_frames,
+                use_must3r=use_must3r
             )
         else:
             poses_path = self.dirs['camera_data'] / 'camera_poses.npy'
@@ -377,7 +382,8 @@ class VaneliaPipeline:
                 self.step1_extract_camera_poses(
                     video_path=video_path,
                     frame_interval=frame_interval,
-                    max_frames=max_frames
+                    max_frames=max_frames,
+                    use_must3r=use_must3r
                 )
 
         # Analyze object placement (after Step 1, before Step 2)
@@ -522,6 +528,9 @@ Examples:
                        help='Frame sampling interval (default: 1)')
     parser.add_argument('--max-frames', type=int, default=None,
                        help='Maximum frames to process (default: all)')
+    parser.add_argument('--camera-extractor', type=str, default='must3r',
+                       choices=['must3r', 'dust3r'],
+                       help='Camera extraction method: must3r (default, temporal consistency) or dust3r (legacy)')
 
     # Rendering settings
     parser.add_argument('--model-scale', type=float, default=None,
@@ -597,6 +606,7 @@ Examples:
             output_path=args.output,
             frame_interval=args.frame_interval,
             max_frames=args.max_frames,
+            camera_extractor=args.camera_extractor,
             model_scale=args.model_scale,
             resolution=tuple(args.resolution),
             compositor_type=args.compositor_type,

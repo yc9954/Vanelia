@@ -23,11 +23,11 @@ def download_checkpoint():
     checkpoint_path = checkpoint_dir / "Video_HYouTube_256.pth"
 
     # Check if already downloaded
-    if os.path.exists(checkpoint_path):
+    if checkpoint_path.exists():
         print(f"[INFO] Checkpoint already exists at: {checkpoint_path}")
-        file_size = os.path.getsize(checkpoint_path) / (1024 * 1024)  # MB
+        file_size = checkpoint_path.stat().st_size / (1024 * 1024)  # MB
         print(f"[INFO] File size: {file_size:.2f} MB")
-        return checkpoint_path
+        return str(checkpoint_path)
 
     # Google Drive file ID for Video_HYouTube_256.pth
     file_id = "1Tv9aahaPmJ_RGeYdawLCNWNGabZgJo6y"
@@ -38,11 +38,11 @@ def download_checkpoint():
     print(f"[INFO] Destination: {checkpoint_path}")
 
     try:
-        gdown.download(url, checkpoint_path, quiet=False)
+        gdown.download(url, str(checkpoint_path), quiet=False)
         print(f"[SUCCESS] Downloaded checkpoint to: {checkpoint_path}")
-        file_size = os.path.getsize(checkpoint_path) / (1024 * 1024)  # MB
+        file_size = checkpoint_path.stat().st_size / (1024 * 1024)  # MB
         print(f"[INFO] File size: {file_size:.2f} MB")
-        return checkpoint_path
+        return str(checkpoint_path)
     except Exception as e:
         print(f"[ERROR] Failed to download checkpoint: {e}")
         print(f"\n[MANUAL] Please download manually from:")

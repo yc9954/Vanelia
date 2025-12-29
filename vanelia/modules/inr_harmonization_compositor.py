@@ -22,7 +22,7 @@ from tqdm import tqdm
 # Add INR-Harmonization to path
 # Try environment variable first, then common locations
 INR_HARMON_PATH = os.getenv('INR_HARMONIZATION_PATH')
-if INR_HARMON_PATH and os.path.exists(INR_HARMON_PATH):
+if INR_HARMON_PATH and Path(INR_HARMON_PATH).exists():
     sys.path.insert(0, INR_HARMON_PATH)
 else:
     # Try common installation locations
@@ -51,7 +51,8 @@ class INRHarmonizationCompositor:
         checkpoint_path=None,
         base_size=256,
         input_size=256,
-        auto_download=True
+        auto_download=True,
+        batch_size=4
     ):
         """
         Initialize INR-Harmonization compositor.
@@ -62,10 +63,12 @@ class INRHarmonizationCompositor:
             base_size (int): Encoder input resolution
             input_size (int): Target output resolution
             auto_download (bool): Automatically download checkpoint if not found
+            batch_size (int): Number of frames to process in parallel (default: 4)
         """
         self.device = device
         self.base_size = base_size
         self.input_size = input_size
+        self.batch_size = batch_size
 
         # Find or download checkpoint
         if checkpoint_path is None:
@@ -272,23 +275,113 @@ class INRHarmonizationCompositor:
 
         return result
 
+    def process_frame_batch(self, background_frames, render_frames, original_shapes):
+        """
+        Process a batch of frames for better GPU efficiency.
+
+        Args:
+            background_frames (list): List of background RGB images (H, W, 3), range [0, 255]
+            render_frames (list): List of rendered RGBA images (H, W, 4), range [0, 255]
+            original_shapes (list): List of (H, W) tuples for original resolutions
+
+        Returns:
+            list: List of harmonized RGB images (H, W, 3), range [0, 255]
+        """
+        batch_size = len(background_frames)
+
+        # Prepare batch data
+        composite_tensors = []
+        mask_tensors = []
+        alpha_masks = []
+
+        for bg_frame, render_frame in zip(background_frames, render_frames):
+            # Extract alpha mask and RGB from render
+            alpha_mask = render_frame[:, :, 3:4] / 255.0  # (H, W, 1)
+            render_rgb = render_frame[:, :, :3]  # (H, W, 3)
+
+            # Create composite image
+            composite = (render_rgb * alpha_mask + bg_frame * (1 - alpha_mask)).astype(np.uint8)
+
+            # Convert mask to binary
+            binary_mask = (alpha_mask > 0.5).astype(np.uint8) * 255
+
+            # Resize to model input size
+            composite_pil = Image.fromarray(composite)
+            mask_pil = Image.fromarray(binary_mask.squeeze(), mode='L')
+
+            composite_resized = composite_pil.resize((self.input_size, self.input_size), Image.BILINEAR)
+            mask_resized = mask_pil.resize((self.input_size, self.input_size), Image.NEAREST)
+
+            # Convert to tensors
+            composite_tensor = self.torch_transform(composite_resized)  # (3, H, W)
+            mask_tensor = transforms.ToTensor()(mask_resized)  # (1, H, W)
+
+            composite_tensors.append(composite_tensor)
+            mask_tensors.append(mask_tensor)
+            alpha_masks.append(alpha_mask)
+
+        # Stack into batches and move to device
+        composite_batch = torch.stack(composite_tensors).to(self.device)  # (B, 3, H, W)
+        mask_batch = torch.stack(mask_tensors).to(self.device)  # (B, 1, H, W)
+
+        # Create INR coordinates directly on device (same for all frames in batch)
+        y_coords = torch.linspace(-1, 1, self.input_size, device=self.device)
+        x_coords = torch.linspace(-1, 1, self.input_size, device=self.device)
+        yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        fg_coords = torch.stack([xx, yy], dim=-1)  # (H, W, 2) on device
+        fg_coords_batch = fg_coords.unsqueeze(0).repeat(batch_size, 1, 1, 1)  # (B, H, W, 2)
+
+        # Run model on batch
+        with torch.no_grad():
+            output = self.model(composite_batch, mask_batch, fg_coords_batch)
+
+            if isinstance(output, tuple) and len(output) >= 1:
+                if isinstance(output[0], list):
+                    harmonized_batch = output[0][-1]
+                else:
+                    harmonized_batch = output[0]
+            else:
+                harmonized_batch = output
+
+        # Denormalize
+        harmonized_batch = self._normalize(harmonized_batch, mode='inv')
+        harmonized_batch = torch.clamp(harmonized_batch, 0, 1)
+
+        # Convert back to numpy and process each frame
+        results = []
+        for i in range(batch_size):
+            harmonized_np = harmonized_batch[i].permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
+            harmonized_np = (harmonized_np * 255).astype(np.uint8)
+
+            # Resize back to original resolution
+            H, W = original_shapes[i]
+            harmonized_resized = cv2.resize(harmonized_np, (W, H), interpolation=cv2.INTER_LINEAR)
+
+            # Blend with original background
+            result = (harmonized_resized * alpha_masks[i] + background_frames[i] * (1 - alpha_masks[i])).astype(np.uint8)
+            results.append(result)
+
+        return results
+
     def process_video_sequence(
         self,
         render_dir,
         background_dir,
         output_dir,
         strength=1.0,
-        seed=None
+        seed=None,
+        batch_size=None
     ):
         """
-        Process a video sequence.
+        Process a video sequence with batch processing for better performance.
 
         Args:
             render_dir (str): Directory containing rendered RGBA frames
             background_dir (str): Directory containing background RGB frames
             output_dir (str): Directory to save harmonized frames
-            strength (float): Blending strength (0-1), currently unused
+            strength (float): Blending strength (0-1). Values < 1.0 blend harmonized output with original composite.
             seed (int): Random seed for reproducibility
+            batch_size (int): Batch size for processing (default: use self.batch_size)
 
         Returns:
             list: List of output frame paths
@@ -298,56 +391,132 @@ class INRHarmonizationCompositor:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        if batch_size is None:
+            batch_size = self.batch_size
+
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
+            # Also set random seed for Python's random module (used by some libraries)
+            import random
+            random.seed(seed)
 
         # Get frame files
         render_frames = sorted(render_dir.glob("*.png"))
         if not render_frames:
             raise FileNotFoundError(f"No PNG frames found in {render_dir}")
 
-        print(f"[INR-Harmonization] Processing {len(render_frames)} frames...")
+        print(f"[INR-Harmonization] Processing {len(render_frames)} frames with batch_size={batch_size}...")
 
         output_paths = []
+        failed_frames = []
 
-        for render_path in tqdm(render_frames, desc="Harmonizing"):
-            frame_name = render_path.name
-            bg_path = background_dir / frame_name
+        # Process in batches
+        for batch_start in tqdm(range(0, len(render_frames), batch_size), desc="Harmonizing batches"):
+            batch_end = min(batch_start + batch_size, len(render_frames))
+            batch_paths = render_frames[batch_start:batch_end]
 
-            if not bg_path.exists():
-                print(f"[WARNING] Background frame not found: {bg_path}, skipping")
+            # Load batch data
+            bg_frames_rgb = []
+            render_frames_rgba = []
+            valid_frame_names = []
+            original_shapes = []
+
+            for render_path in batch_paths:
+                frame_name = render_path.name
+                bg_path = background_dir / frame_name
+
+                if not bg_path.exists():
+                    print(f"[WARNING] Background frame not found: {bg_path}, skipping")
+                    failed_frames.append((frame_name, "background not found"))
+                    continue
+
+                # Load frames with error handling
+                render_frame = cv2.imread(str(render_path), cv2.IMREAD_UNCHANGED)
+                bg_frame = cv2.imread(str(bg_path), cv2.IMREAD_COLOR)
+
+                # Error handling for cv2.imread failures (W7)
+                if render_frame is None:
+                    print(f"[ERROR] Failed to read render frame: {render_path}")
+                    failed_frames.append((frame_name, "render read failed"))
+                    continue
+
+                if bg_frame is None:
+                    print(f"[ERROR] Failed to read background frame: {bg_path}")
+                    failed_frames.append((frame_name, "background read failed"))
+                    continue
+
+                # Validate frame dimensions
+                if len(bg_frame.shape) != 3 or bg_frame.shape[2] != 3:
+                    print(f"[ERROR] Invalid background frame shape: {bg_frame.shape}")
+                    failed_frames.append((frame_name, "invalid background shape"))
+                    continue
+
+                if len(render_frame.shape) != 3 or render_frame.shape[2] not in [3, 4]:
+                    print(f"[ERROR] Invalid render frame shape: {render_frame.shape}")
+                    failed_frames.append((frame_name, "invalid render shape"))
+                    continue
+
+                # Convert BGR to RGB
+                bg_frame_rgb = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2RGB)
+
+                # Handle alpha channel
+                if render_frame.shape[2] == 3:
+                    # Add alpha channel if missing
+                    render_frame_rgba = np.dstack([render_frame, np.ones(render_frame.shape[:2], dtype=np.uint8) * 255])
+                else:
+                    render_frame_rgba = cv2.cvtColor(render_frame, cv2.COLOR_BGRA2RGBA)
+
+                bg_frames_rgb.append(bg_frame_rgb)
+                render_frames_rgba.append(render_frame_rgba)
+                valid_frame_names.append(frame_name)
+                original_shapes.append(bg_frame_rgb.shape[:2])
+
+            # Skip if no valid frames in batch
+            if not bg_frames_rgb:
                 continue
 
-            # Load frames
-            render_frame = cv2.imread(str(render_path), cv2.IMREAD_UNCHANGED)  # RGBA
-            bg_frame = cv2.imread(str(bg_path), cv2.IMREAD_COLOR)  # BGR
+            # Process batch
+            harmonized_frames = self.process_frame_batch(bg_frames_rgb, render_frames_rgba, original_shapes)
 
-            if render_frame is None or bg_frame is None:
-                print(f"[WARNING] Failed to load {frame_name}, skipping")
-                continue
+            # Apply strength blending if needed (W4)
+            if strength < 1.0:
+                for i in range(len(harmonized_frames)):
+                    # Create original composite
+                    alpha_mask = render_frames_rgba[i][:, :, 3:4] / 255.0
+                    render_rgb = render_frames_rgba[i][:, :, :3]
+                    composite = (render_rgb * alpha_mask + bg_frames_rgb[i] * (1 - alpha_mask)).astype(np.uint8)
 
-            # Convert BGR to RGB
-            bg_frame_rgb = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2RGB)
+                    # Blend harmonized with composite
+                    harmonized_frames[i] = (
+                        harmonized_frames[i] * strength + composite * (1 - strength)
+                    ).astype(np.uint8)
 
-            if render_frame.shape[2] == 3:
-                # Add alpha channel if missing
-                render_frame_rgba = np.dstack([render_frame, np.ones(render_frame.shape[:2], dtype=np.uint8) * 255])
-            else:
-                render_frame_rgba = cv2.cvtColor(render_frame, cv2.COLOR_BGRA2RGBA)
+            # Save batch results
+            for harmonized, frame_name in zip(harmonized_frames, valid_frame_names):
+                # Convert back to BGR for saving
+                harmonized_bgr = cv2.cvtColor(harmonized, cv2.COLOR_RGB2BGR)
 
-            # Process frame
-            harmonized = self.process_frame(bg_frame_rgb, render_frame_rgba)
+                # Save with error handling
+                output_path = output_dir / frame_name
+                success = cv2.imwrite(str(output_path), harmonized_bgr)
 
-            # Convert back to BGR for saving
-            harmonized_bgr = cv2.cvtColor(harmonized, cv2.COLOR_RGB2BGR)
+                if not success:
+                    print(f"[ERROR] Failed to write frame: {output_path}")
+                    failed_frames.append((frame_name, "write failed"))
+                else:
+                    output_paths.append(output_path)
 
-            # Save
-            output_path = output_dir / frame_name
-            cv2.imwrite(str(output_path), harmonized_bgr)
-            output_paths.append(output_path)
+        # Report results
+        print(f"[INR-Harmonization] Successfully processed {len(output_paths)}/{len(render_frames)} frames")
+        if failed_frames:
+            print(f"[WARNING] {len(failed_frames)} frames failed:")
+            for frame_name, reason in failed_frames[:10]:  # Show first 10
+                print(f"  - {frame_name}: {reason}")
+            if len(failed_frames) > 10:
+                print(f"  ... and {len(failed_frames) - 10} more")
 
-        print(f"[INR-Harmonization] Saved {len(output_paths)} frames to {output_dir}")
+        print(f"[INR-Harmonization] Saved frames to {output_dir}")
         return output_paths
 
     def encode_video_ffmpeg(self, frame_dir: str, output_path: str,
