@@ -172,6 +172,8 @@ class VaneliaPipeline:
         return render_frames
 
     def step3_composite_and_refine(self,
+                                  compositor_type: str = "controlnet",
+                                  controlnet_type: str = "depth",
                                   strength: float = 0.4,
                                   seed: int = 12345,
                                   latent_blend: float = 0.15,
@@ -183,14 +185,15 @@ class VaneliaPipeline:
         Step 3: Composite and refine using ControlNet or IC-Light.
 
         Args:
+            compositor_type: 'controlnet' (recommended) or 'iclight'
+            controlnet_type: 'depth', 'normal', or 'canny' (ControlNet only)
             strength: Denoising strength (0.3-0.5 for ControlNet, 0.2-0.3 for IC-Light)
             seed: Fixed random seed
             latent_blend: Latent blending ratio (IC-Light only)
             fps: Output video FPS
             crf: Video quality (18=high)
-            compositor_type: 'controlnet' (recommended) or 'iclight'
-            controlnet_type: 'depth', 'normal', or 'canny' (ControlNet only)
             output_path: Final video output path
+            batch_size: Batch size for IC-Light processing
 
         Returns:
             Path to final video
@@ -509,9 +512,6 @@ Examples:
             frame_interval=args.frame_interval,
             max_frames=args.max_frames,
             model_scale=args.model_scale,
-            position=tuple(args.position),
-            rotation=tuple(args.rotation),
-            auto_ground=not args.no_auto_ground,
             resolution=tuple(args.resolution),
             compositor_type=args.compositor_type,
             controlnet_type=args.controlnet_type,
