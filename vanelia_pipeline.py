@@ -216,7 +216,25 @@ class VaneliaPipeline:
         print(f"STEP 3: Compositing & Refinement ({compositor_type.upper()})")
         print(f"{'─'*70}\n")
 
-        if compositor_type == "controlnet":
+        if compositor_type == "photorealistic":
+            from vanelia.modules.photorealistic_compositor import PhotorealisticCompositor
+
+            # Initialize Photorealistic compositor (Anything in Any Scene approach)
+            compositor = PhotorealisticCompositor(
+                device='cuda',
+                cnum=48  # Base channel number (can be tuned: 32, 48, 64)
+            )
+
+            # Process frames - coarse-to-fine style transfer
+            output_frames = compositor.process_video_sequence(
+                render_dir=str(self.dirs['render_frames']),
+                background_dir=str(self.dirs['background_frames']),
+                output_dir=str(self.dirs['refined_frames']),
+                strength=strength,
+                seed=seed
+            )
+
+        elif compositor_type == "controlnet":
             from vanelia.modules.controlnet_compositor import ControlNetCompositor
 
             # Initialize ControlNet compositor
@@ -252,7 +270,7 @@ class VaneliaPipeline:
             )
 
         else:
-            raise ValueError(f"Unknown compositor type: {compositor_type}. Choose 'controlnet' or 'iclight'")
+            raise ValueError(f"Unknown compositor type: {compositor_type}. Choose 'photorealistic', 'controlnet', or 'iclight'")
 
         # Encode video
         if output_path is None:
@@ -438,24 +456,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage (ControlNet-Depth, recommended)
+  # Basic usage (Photorealistic compositor - RECOMMENDED!)
   python vanelia_pipeline.py --input video.mp4 --model product.glb --output final.mp4
 
-  # Use IC-Light compositor instead
+  # Use photorealistic compositor explicitly (same as above)
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --compositor-type photorealistic --output final.mp4
+
+  # Use ControlNet compositor instead (legacy)
+  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
+      --compositor-type controlnet --controlnet-type depth --output final.mp4
+
+  # Use IC-Light compositor instead (legacy)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
       --compositor-type iclight --strength 0.25 --output final.mp4
 
-  # Use ControlNet-Normal for better surface detail
+  # Process every 2nd frame, max 30 frames (memory-safe)
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --controlnet-type normal --strength 0.4 --output final.mp4
+      --frame-interval 2 --max-frames 30 --output final.mp4
 
-  # Process every 2nd frame, max 100 frames
+  # High quality settings with photorealistic compositor
   python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --frame-interval 2 --max-frames 100 --output final.mp4
-
-  # High quality settings
-  python vanelia_pipeline.py --input video.mp4 --model product.glb \\
-      --strength 0.35 --crf 15 --fps 60 --output final.mp4
+      --compositor-type photorealistic --crf 15 --fps 60 --output final.mp4
         """
     )
 
@@ -493,9 +515,9 @@ Examples:
                        help='Manual object scale (overrides auto-placement)')
 
     # Compositing settings
-    parser.add_argument('--compositor-type', type=str, default='controlnet',
-                       choices=['controlnet', 'iclight'],
-                       help='Compositor to use (default: controlnet, recommended)')
+    parser.add_argument('--compositor-type', type=str, default='photorealistic',
+                       choices=['photorealistic', 'controlnet', 'iclight'],
+                       help='Compositor to use: photorealistic (Anything in Any Scene - NEW!), controlnet, iclight (default: photorealistic)')
     parser.add_argument('--controlnet-type', type=str, default='depth',
                        choices=['depth', 'normal', 'canny'],
                        help='ControlNet type (default: depth, only used with --compositor-type controlnet)')
