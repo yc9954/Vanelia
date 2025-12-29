@@ -4,13 +4,13 @@
 # Core Dependencies
 torch>=2.0.0
 torchvision>=0.15.0
-numpy>=1.24.0
-opencv-python>=4.8.0
+numpy>=1.24.0,<2.0.0  # NumPy 2.x is incompatible with PyTorch compiled with NumPy 1.x
+opencv-python>=4.8.0,<4.10.0  # Compatible with NumPy 1.x
 pillow>=10.0.0
 
 # Diffusion Models
-diffusers>=0.25.0
-transformers>=4.35.0  # For depth estimation (DPT) and ControlNet
+diffusers>=0.25.0,<0.30.0  # Version 0.30+ requires torch.xpu which may not be available
+transformers>=4.35.0
 accelerate>=0.25.0
 safetensors>=0.4.0
 controlnet-aux>=0.0.7  # ControlNet preprocessors (optional)
@@ -27,6 +27,7 @@ tqdm>=4.66.0  # Progress bars
 einops>=0.7.0
 scipy>=1.11.0  # For lighting estimation (gaussian_filter)
 matplotlib>=3.8.0
+psutil>=5.9.0  # For system memory monitoring and management
 
 # Video processing
 imageio>=2.33.0

@@ -31,11 +31,21 @@ if [ -f "/opt/vanelia_env/bin/activate" ]; then
     source /opt/vanelia_env/bin/activate
 fi
 
+# Get script directory and find pipeline
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIPELINE_SCRIPT="$SCRIPT_DIR/../vanelia_pipeline.py"
+
+# Check if pipeline script exists
+if [ ! -f "$PIPELINE_SCRIPT" ]; then
+    echo "ERROR: Pipeline script not found: $PIPELINE_SCRIPT"
+    exit 1
+fi
+
 # Run pipeline
 echo "Starting Vanelia pipeline..."
 echo ""
 
-python ../vanelia_pipeline.py \
+python "$PIPELINE_SCRIPT" \
     --input "$INPUT_VIDEO" \
     --model "$GLB_MODEL" \
     --output "$OUTPUT_VIDEO" \
