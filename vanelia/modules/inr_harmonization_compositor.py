@@ -172,16 +172,35 @@ class INRHarmonizationCompositor:
         return model
 
     def _load_checkpoint(self):
-        """Load pre-trained checkpoint."""
+        """
+        Load pre-trained checkpoint (I1).
+
+        Checkpoint Structure:
+        --------------------
+        The Video_HYouTube_256.pth checkpoint contains:
+        - Trained on HYouTube dataset (20-frame video clips)
+        - Resolution: 256x256 (encoder input)
+        - Architecture: HRNetV2 encoder + INR decoder
+        - Format: PyTorch state_dict (may be wrapped in 'model' key)
+
+        Expected keys:
+        - encoder.* : HRNetV2 feature extraction weights
+        - decoder.* : INR harmonization decoder weights
+        - Optional: optimizer, epoch, loss (not loaded)
+
+        The checkpoint supports arbitrary resolution inference via INR,
+        despite being trained at 256x256.
+        """
         print(f"[INR-Harmonization] Loading checkpoint from {self.checkpoint_path}")
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
 
+        # Handle different checkpoint formats
         if 'model' in checkpoint:
             state_dict = checkpoint['model']
         else:
             state_dict = checkpoint
 
-        # Load weights
+        # Load weights (strict=False to ignore optimizer state)
         self.model.load_state_dict(state_dict, strict=False)
         print(f"[INR-Harmonization] Checkpoint loaded successfully")
 
@@ -274,6 +293,33 @@ class INRHarmonizationCompositor:
         result = (harmonized_resized * alpha_mask + background_frame * (1 - alpha_mask)).astype(np.uint8)
 
         return result
+
+    def _validate_image_format(self, image_path: Path) -> bool:
+        """
+        Validate image format and readability (I2).
+
+        Args:
+            image_path: Path to image file
+
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        # Check file exists
+        if not image_path.exists():
+            return False
+
+        # Check file extension
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif'}
+        if image_path.suffix.lower() not in valid_extensions:
+            print(f"[WARNING] Unsupported image format: {image_path.suffix}")
+            return False
+
+        # Check file is not empty
+        if image_path.stat().st_size == 0:
+            print(f"[WARNING] Empty file: {image_path}")
+            return False
+
+        return True
 
     def process_frame_batch(self, background_frames, render_frames, original_shapes):
         """
@@ -426,9 +472,13 @@ class INRHarmonizationCompositor:
                 frame_name = render_path.name
                 bg_path = background_dir / frame_name
 
-                if not bg_path.exists():
-                    print(f"[WARNING] Background frame not found: {bg_path}, skipping")
-                    failed_frames.append((frame_name, "background not found"))
+                # Validate image formats (I2)
+                if not self._validate_image_format(render_path):
+                    failed_frames.append((frame_name, "invalid render format"))
+                    continue
+
+                if not self._validate_image_format(bg_path):
+                    failed_frames.append((frame_name, "invalid background format"))
                     continue
 
                 # Load frames with error handling
@@ -506,6 +556,10 @@ class INRHarmonizationCompositor:
                     failed_frames.append((frame_name, "write failed"))
                 else:
                     output_paths.append(output_path)
+
+        # Clean up GPU memory (I4)
+        if self.device == 'cuda':
+            torch.cuda.empty_cache()
 
         # Report results
         print(f"[INR-Harmonization] Successfully processed {len(output_paths)}/{len(render_frames)} frames")
