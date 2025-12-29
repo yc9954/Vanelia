@@ -47,10 +47,31 @@ if [ ! -d "/workspace/dust3r" ]; then
     cd /workspace
     git clone https://github.com/naver/dust3r.git
     cd dust3r
-    pip install -e .
+
+    # Install dependencies if requirements.txt exists
+    if [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt
+    fi
+
+    # Try to install if setup files exist, otherwise just use PYTHONPATH
+    if [ -f "setup.py" ] || [ -f "pyproject.toml" ]; then
+        pip install -e .
+    else
+        echo "  Note: Dust3R will be loaded via PYTHONPATH (no setup.py found)"
+    fi
+
+    # Add to PYTHONPATH permanently
+    echo 'export PYTHONPATH="/workspace/dust3r:$PYTHONPATH"' >> ~/.bashrc
+    export PYTHONPATH="/workspace/dust3r:$PYTHONPATH"
+
     echo "✓ Dust3R installed to /workspace/dust3r"
 else
     echo "✓ Dust3R already installed"
+    # Ensure PYTHONPATH is set
+    if ! grep -q "/workspace/dust3r" ~/.bashrc; then
+        echo 'export PYTHONPATH="/workspace/dust3r:$PYTHONPATH"' >> ~/.bashrc
+    fi
+    export PYTHONPATH="/workspace/dust3r:$PYTHONPATH"
 fi
 
 # 4. Set PyTorch memory allocation config
